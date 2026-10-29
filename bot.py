@@ -47,11 +47,13 @@ CONFIG = {
     # di ogni crypto e adotta la migliore, solo se regge anche sui giorni più recenti
     "asset_candidati": ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"],
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
-    "ottimizza_ogni_ore": 24,
-    "giorni_storico": 60,
+    "ottimizza_ogni_ore": 4,         # ogni 4 ore rifà l'analisi del mercato
+    "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
+    "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
     "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
     "peso_rischio": 0.3,             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
     "pausa_dopo_vendita_ore": 6,     # dopo una vendita aspetta prima di ricomprare la stessa crypto
+    "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
     "ora_report": 21,                # ora (Italia) del resoconto giornaliero su Telegram
 }
@@ -155,19 +157,21 @@ class RevX:
         # scarta la candela ancora aperta
         return [c for c in candele if c["start"] + intervallo * 60_000 <= adesso]
 
-    def storico(self, simbolo, ore):
-        """Candele orarie degli ultimi `ore`, scaricate a blocchi da 100."""
-        fine = ora_ms() // 3_600_000 * 3_600_000
+    def storico(self, simbolo, ore, minuti=60):
+        """Candele da `minuti` (60 o 15) delle ultime `ore`, scaricate a blocchi da 100."""
+        passo = minuti * 60_000
+        fine = ora_ms() // passo * passo
+        quante = ore * 60 // minuti
         tutte = {}
-        while ore > 0:
-            blocco = min(ore, 100)
-            inizio = fine - blocco * 3_600_000
-            res = self._call("GET", f"/candles/{simbolo}", query=f"interval=60&since={inizio}&until={fine}")
+        while quante > 0:
+            blocco = min(quante, 100)
+            inizio = fine - blocco * passo
+            res = self._call("GET", f"/candles/{simbolo}", query=f"interval={minuti}&since={inizio}&until={fine}")
             for c in res["data"]:
                 tutte[c["start"]] = c
-            fine, ore = inizio, ore - blocco
+            fine, quante = inizio, quante - blocco
         adesso = ora_ms()
-        return [tutte[k] for k in sorted(tutte) if k + 3_600_000 <= adesso]
+        return [tutte[k] for k in sorted(tutte) if k + passo <= adesso]
 
     def ordine_market(self, simbolo, lato, quote_size=None, base_size=None):
         conf = {"quote_size": quote_size} if quote_size else {"base_size": base_size}
@@ -286,6 +290,15 @@ def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
 
 
 def griglia():
+    # strategie veloci su candele da 15 minuti: più operazioni al giorno, stop più stretti
+    for ev, el in ((5, 13), (9, 21)):
+        for rmax in (65, 75):
+            for sl in (0.015, 0.025):
+                for tr, att in ((0.01, 0.01), (0.015, 0.02)):
+                    yield {"intervallo_candele": 15, "ema_veloce": ev, "ema_lenta": el,
+                           "rsi_max_ingresso": rmax, "stop_loss": sl,
+                           "trailing_stop": tr, "attiva_trailing_dopo": att}
+    # strategie più calme su candele da 1 e 4 ore
     for intervallo in (60, 240):
         for ev, el in ((9, 21), (12, 26), (20, 50)):
             for rmax in (65, 75):
@@ -294,6 +307,10 @@ def griglia():
                         yield {"intervallo_candele": intervallo, "ema_veloce": ev, "ema_lenta": el,
                                "rsi_max_ingresso": rmax, "stop_loss": sl,
                                "trailing_stop": tr, "attiva_trailing_dopo": att}
+
+
+def pausa_ore(intervallo):
+    return CONFIG["pausa_dopo_vendita_ore_15m"] if intervallo == 15 else CONFIG["pausa_dopo_vendita_ore"]
 
 
 def chiave(P):
@@ -314,12 +331,13 @@ def ottimizza(api, dati, coppie):
     valuta, costo = CONFIG["valuta"], CONFIG["costo_per_operazione"]
     candidati = [a for a in CONFIG["asset_candidati"]
                  if coppie.get(f"{a}/{valuta}", {}).get("status", "active") == "active" and f"{a}/{valuta}" in coppie]
-    storici = {}
+    storici, storici15 = {}, {}
     for a in candidati:
         try:
             st = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico"] * 24)
-            if len(st) >= 24 * 20:
-                storici[a] = st
+            st15 = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico_15m"] * 24, 15)
+            if len(st) >= 24 * 20 and len(st15) >= 96 * 7:
+                storici[a], storici15[a] = st, st15
         except Exception as e:
             print("storico", a, e)
     if not storici:
@@ -327,11 +345,11 @@ def ottimizza(api, dati, coppie):
 
     # indicatori calcolati una volta per crypto e risoluzione
     prep = {}
-    for a, st in storici.items():
-        for intervallo in (60, 240):
-            c = chiusure(st, intervallo)
+    for a in storici:
+        for intervallo in (15, 60, 240):
+            c = [float(x["close"]) for x in storici15[a]] if intervallo == 15 else chiusure(storici[a], intervallo)
             prep[(a, intervallo)] = {"c": c, "rsi": serie_rsi(c, CONFIG["rsi_periodo"]),
-                                     "ema": {p: serie_ema(c, p) for p in (9, 12, 20, 21, 26, 50)}}
+                                     "ema": {p: serie_ema(c, p) for p in (5, 9, 12, 13, 20, 21, 26, 50)}}
 
     def valuta_P(P):
         risultati = {}
@@ -339,12 +357,17 @@ def ottimizza(api, dati, coppie):
             d = prep[(a, P["intervallo_candele"])]
             n = len(d["c"])
             taglio = n * 2 // 3
-            pausa = max(1, -(-CONFIG["pausa_dopo_vendita_ore"] * 60 // P["intervallo_candele"]))
+            giorni_tr = max(1.0, taglio * P["intervallo_candele"] / 1440)
+            giorni_va = max(1.0, (n - taglio) * P["intervallo_candele"] / 1440)
+            pausa = max(1, -(-pausa_ore(P["intervallo_candele"]) * 60 // P["intervallo_candele"]))
             args = (d["c"], d["ema"][P["ema_veloce"]], d["ema"][P["ema_lenta"]], d["rsi"], P)
             r_tr, dd_tr, n_tr = backtest(*args, 0, taglio, costo, pausa)
             r_va, dd_va, n_va = backtest(*args, taglio, n, costo, pausa)
-            risultati[a] = {"train": r_tr - CONFIG["peso_rischio"] * dd_tr, "verifica": r_va - CONFIG["peso_rischio"] * dd_va,
-                            "rend_train": r_tr, "rend_verifica": r_va, "operazioni": n_tr + n_va}
+            # punteggi riportati a "ogni 10 giorni", così strategie veloci e lente sono confrontabili
+            risultati[a] = {"train": (r_tr - CONFIG["peso_rischio"] * dd_tr) * 10 / giorni_tr,
+                            "verifica": (r_va - CONFIG["peso_rischio"] * dd_va) * 10 / giorni_va,
+                            "rend_train": r_tr, "rend_verifica": r_va, "operazioni": n_tr + n_va,
+                            "operazioni_verifica_al_giorno": round(n_va / giorni_va, 1)}
         # le crypto migliori in allenamento, ma solo se guadagnano anche nella verifica
         ordinate = sorted(risultati, key=lambda a: risultati[a]["train"], reverse=True)
         scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0][:CONFIG["max_asset_attivi"]]
@@ -377,7 +400,8 @@ def ottimizza(api, dati, coppie):
     nuova.update({
         "asset": scelte, "aggiornata": ora_ms(), "origine": origine,
         "rendimento_verifica": round(sum(ris[a]["rend_verifica"] for a in scelte) / len(scelte) * 100, 2) if scelte else None,
-        "giorni_verifica": CONFIG["giorni_storico"] // 3,
+        "giorni_verifica": (CONFIG["giorni_storico_15m"] if P["intervallo_candele"] == 15 else CONFIG["giorni_storico"]) // 3,
+        "operazioni_al_giorno": round(sum(ris[a]["operazioni_verifica_al_giorno"] for a in scelte) / len(scelte), 1) if scelte else 0,
         "classifica": {a: {"verifica_%": round(ris[a]["rend_verifica"] * 100, 2),
                            "allenamento_%": round(ris[a]["rend_train"] * 100, 2)} for a in ris},
         "varianti_provate": sum(1 for _ in griglia()),
@@ -396,13 +420,14 @@ def chiave_nomi():
 
 
 def descrivi_strategia(P):
-    ore = "1 ora" if P["intervallo_candele"] == 60 else "4 ore"
+    ore = {15: "15 minuti", 60: "1 ora", 240: "4 ore"}.get(P["intervallo_candele"], f"{P['intervallo_candele']} min")
     crypto = ", ".join(P["asset"]) if P["asset"] else "nessuna (mercato sfavorevole: resta in liquidità)"
     righe = [f"<b>Crypto:</b> {crypto}",
              f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
              f"<b>Stop loss:</b> -{P['stop_loss']*100:.0f}% · <b>trailing:</b> -{P['trailing_stop']*100:.0f}% dopo +{P['attiva_trailing_dopo']*100:.0f}%"]
     if P.get("rendimento_verifica") is not None:
         righe.append(f"<b>Test sugli ultimi {P.get('giorni_verifica', 20)} giorni:</b> {P['rendimento_verifica']:+.2f}% (simulazione al netto dei costi, non è una promessa)")
+        righe.append(f"<b>Operazioni previste:</b> circa {P.get('operazioni_al_giorno', 0)} al giorno per crypto")
     return "\n".join(righe)
 
 
@@ -759,8 +784,11 @@ def main():
             if sim not in prezzi:
                 continue
             try:
-                ore = (P["ema_lenta"] + 40) * P["intervallo_candele"] // 60
-                ch = chiusure(api.storico(sim, ore), P["intervallo_candele"])
+                if P["intervallo_candele"] == 15:
+                    ch = [float(x["close"]) for x in api.storico(sim, (P["ema_lenta"] + 40) // 4 + 1, 15)]
+                else:
+                    ore = (P["ema_lenta"] + 40) * P["intervallo_candele"] // 60
+                    ch = chiusure(api.storico(sim, ore), P["intervallo_candele"])
             except Exception as e:
                 dati["errori"] = (dati["errori"] + [f"{ora_iso()} candele {a}: {e}"])[-20:]
                 continue
@@ -790,7 +818,7 @@ def main():
                     vendi(api, dati, a, qty, bid, coppie, motivo)
                     saldi = api.saldi()
             elif a in P["asset"] and dati["stato"] == "attivo" and trend_su and r < P["rsi_max_ingresso"]:
-                pausa = CONFIG["pausa_dopo_vendita_ore"] * 3_600_000
+                pausa = pausa_ore(P["intervallo_candele"]) * 3_600_000
                 if ora_ms() - dati["ultima_vendita"].get(a, 0) < pausa:
                     continue
                 # usa solo la liquidità del bot (100 € + guadagni), mai altri euro del conto
