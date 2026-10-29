@@ -1,0 +1,69 @@
+{
+ "versione": 1,
+ "valuta": "EUR",
+ "inizio": null,
+ "capitale_iniziale": null,
+ "prezzo_btc_iniziale": null,
+ "stato": "attivo",
+ "base_emergenza": null,
+ "posizioni": {},
+ "ultima_vendita": {},
+ "operazioni": [],
+ "equity": [],
+ "segnali": {},
+ "capitale_bot": null,
+ "strategia": {
+  "intervallo_candele": 60,
+  "ema_veloce": 20,
+  "ema_lenta": 50,
+  "rsi_max_ingresso": 70,
+  "stop_loss": 0.05,
+  "trailing_stop": 0.03,
+  "attiva_trailing_dopo": 0.03,
+  "asset": [
+   "BTC",
+   "ETH"
+  ],
+  "aggiornata": null,
+  "origine": "impostazioni iniziali"
+ },
+ "tg_offset": 0,
+ "ultimo_report": null,
+ "config": {
+  "valuta": "EUR",
+  "capitale_bot": 100.0,
+  "asset": [
+   "BTC",
+   "ETH"
+  ],
+  "intervallo_candele": 60,
+  "ema_veloce": 20,
+  "ema_lenta": 50,
+  "rsi_periodo": 14,
+  "rsi_max_ingresso": 70,
+  "stop_loss": 0.05,
+  "attiva_trailing_dopo": 0.03,
+  "trailing_stop": 0.03,
+  "ordine_minimo": 5.0,
+  "asset_candidati": [
+   "BTC",
+   "ETH",
+   "SOL",
+   "XRP",
+   "ADA",
+   "DOGE",
+   "LINK",
+   "AVAX"
+  ],
+  "max_asset_attivi": 3,
+  "ottimizza_ogni_ore": 24,
+  "giorni_storico": 60,
+  "costo_per_operazione": 0.0015,
+  "peso_rischio": 0.3,
+  "pausa_dopo_vendita_ore": 6,
+  "soglia_emergenza": 0.7,
+  "ora_report": 21
+ },
+ "errori": [],
+ "aggiornato": "2026-10-29T18:43:55+00:00"
+}
