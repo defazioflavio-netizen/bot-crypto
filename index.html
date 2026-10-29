@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0d12">
+<title>Bot Crypto</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0d12; --card:#151922; --line:#232a36; --text:#e9edf3; --muted:#8a94a6;
+    --up:#22c55e; --down:#ef4444; --accent:#7c8cff; --bench:#f5b942;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+    padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 24px)}
+  .wrap{max-width:720px;margin:0 auto}
+  header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  h1{font-size:20px;margin:0;letter-spacing:-.3px}
+  .badge{font-size:12px;padding:4px 10px;border-radius:999px;background:var(--line);color:var(--muted);font-weight:600}
+  .badge.attivo{background:rgba(34,197,94,.15);color:var(--up)}
+  .badge.pausa{background:rgba(245,185,66,.15);color:var(--bench)}
+  .badge.fermato{background:rgba(239,68,68,.15);color:var(--down)}
+  .hero{background:var(--card);border-radius:18px;padding:18px;margin-bottom:12px}
+  .hero .lbl{color:var(--muted);font-size:13px}
+  .hero .val{font-size:38px;font-weight:700;letter-spacing:-1px;margin:2px 0}
+  .hero .delta{font-size:16px;font-weight:600}
+  .up{color:var(--up)} .down{color:var(--down)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  .k{background:var(--card);border-radius:14px;padding:12px 14px}
+  .k .lbl{color:var(--muted);font-size:12px}
+  .k .v{font-size:18px;font-weight:650;margin-top:2px}
+  .card{background:var(--card);border-radius:18px;padding:14px;margin-bottom:12px}
+  .card h2{font-size:15px;margin:0 0 10px;color:var(--muted);font-weight:600}
+  .chartbox{position:relative;height:240px}
+  .tabs{display:flex;gap:6px;margin-bottom:10px}
+  .tabs button{flex:1;background:var(--line);color:var(--muted);border:0;border-radius:10px;padding:7px 0;font-weight:600;font-size:13px}
+  .tabs button.on{background:var(--accent);color:#fff}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:8px}
+  .legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .row .t{font-weight:600}
+  .row .s{color:var(--muted);font-size:12px}
+  .row .r{text-align:right}
+  .pill{font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;margin-right:6px}
+  .pill.buy{background:rgba(34,197,94,.15);color:var(--up)}
+  .pill.sell{background:rgba(239,68,68,.15);color:var(--down)}
+  .empty{color:var(--muted);text-align:center;padding:16px 0;font-size:14px}
+  .foot{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+  .err{background:rgba(239,68,68,.12);color:#fca5a5;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:12px;display:none;word-break:break-word}
+  .more{width:100%;background:var(--line);color:var(--text);border:0;border-radius:10px;padding:9px;margin-top:8px;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Bot Crypto</h1>
+    <span id="stato" class="badge">…</span>
+  </header>
+
+  <div id="errore" class="err"></div>
+
+  <div class="hero">
+    <div class="lbl">Valore attuale</div>
+    <div class="val" id="valore">–</div>
+    <div class="delta" id="delta">–</div>
+  </div>
+
+  <div class="grid">
+    <div class="k"><div class="lbl">Investimento iniziale</div><div class="v" id="iniziale">–</div></div>
+    <div class="k"><div class="lbl">Se avessi solo tenuto BTC</div><div class="v" id="bench">–</div></div>
+    <div class="k"><div class="lbl">Operazioni</div><div class="v" id="nops">–</div></div>
+    <div class="k"><div class="lbl">Vendite in guadagno</div><div class="v" id="win">–</div></div>
+    <div class="k"><div class="lbl">Commissioni pagate</div><div class="v" id="fee">–</div></div>
+    <div class="k"><div class="lbl">Calo massimo</div><div class="v" id="dd">–</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Andamento</h2>
+    <div class="tabs" id="tabs">
+      <button data-g="1">1G</button><button data-g="7">7G</button>
+      <button data-g="30">30G</button><button data-g="0" class="on">Tutto</button>
+    </div>
+    <div class="chartbox"><canvas id="grafico"></canvas></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>Bot</span><span><i style="background:var(--bench)"></i>Solo BTC</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Posizioni aperte</h2>
+    <div id="posizioni"></div>
+  </div>
+
+  <div class="card">
+    <h2>Cosa vede il bot</h2>
+    <div id="segnali"></div>
+  </div>
+
+  <div class="card">
+    <h2>Strategia · si riadatta ogni giorno</h2>
+    <div id="strategia"></div>
+  </div>
+
+  <div class="card">
+    <h2>Storico movimenti</h2>
+    <div id="storico"></div>
+    <button class="more" id="more" style="display:none">Mostra tutto</button>
+  </div>
+
+  <div class="foot" id="agg">–</div>
+</div>
+
+<script>
+const fmt = n => (n==null||isNaN(n)) ? "–" : n.toLocaleString("it-IT",{style:"currency",currency:"EUR"});
+const pct = n => (n>=0?"+":"") + n.toFixed(2).replace(".",",") + "%";
+const dt = t => new Date(t).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+let dati=null, chart=null, giorni=0, tutto=false;
+
+function sorgenti(){
+  const list=[];
+  const h=location.hostname;
+  if(h.endsWith("github.io")){
+    const owner=h.split(".")[0], repo=location.pathname.split("/").filter(Boolean)[0];
+    if(repo) list.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data.json?t=${Date.now()}`);
+  }
+  list.push(`data.json?t=${Date.now()}`);
+  return list;
+}
+
+async function carica(){
+  for(const url of sorgenti()){
+    try{ const r=await fetch(url,{cache:"no-store"}); if(r.ok){ dati=await r.json(); render(); return; } }catch(e){}
+  }
+  document.getElementById("agg").textContent="Dati non ancora disponibili: il bot non ha ancora fatto il primo giro.";
+}
+
+function render(){
+  const d=dati, ini=d.capitale_iniziale||0, eq=d.equity||[];
+  const val = d.valore_attuale ?? (eq.length?eq[eq.length-1][1]:null);
+  const st=document.getElementById("stato");
+  st.textContent=d.stato||"–";
+  st.className="badge "+(d.stato==="attivo"?"attivo":d.stato==="in pausa"?"pausa":d.stato==="fermato"?"fermato":"");
+
+  document.getElementById("valore").textContent=fmt(val);
+  if(ini && val!=null){
+    const diff=val-ini, el=document.getElementById("delta");
+    el.textContent=`${diff>=0?"+":""}${fmt(diff)}  (${pct(diff/ini*100)})`;
+    el.className="delta "+(diff>=0?"up":"down");
+  } else document.getElementById("delta").textContent="In attesa del primo deposito";
+  document.getElementById("iniziale").textContent=fmt(ini||null);
+  const b=eq.length?eq[eq.length-1][2]:null;
+  document.getElementById("bench").textContent=fmt(b);
+
+  const ops=d.operazioni||[], vendite=ops.filter(o=>o.risultato!=null);
+  document.getElementById("nops").textContent=ops.length;
+  document.getElementById("win").textContent=vendite.length? `${vendite.filter(o=>o.risultato>0).length}/${vendite.length}` : "–";
+  document.getElementById("fee").textContent=fmt(ops.reduce((s,o)=>s+(o.commissione||0),0));
+  let picco=-Infinity, dd=0; eq.forEach(p=>{picco=Math.max(picco,p[1]); dd=Math.min(dd,(p[1]-picco)/picco*100)});
+  document.getElementById("dd").textContent=eq.length?pct(dd):"–";
+
+  // posizioni
+  const pos=d.posizioni||{}, sg=d.segnali||{}, pEl=document.getElementById("posizioni");
+  const keys=Object.keys(pos);
+  pEl.innerHTML = keys.length ? keys.map(a=>{
+    const p=pos[a], prezzo=sg[a]?.prezzo, q=parseFloat(p.qty), v=prezzo?q*prezzo:null;
+    const r=prezzo?(prezzo/p.prezzo_ingresso-1)*100:null;
+    return `<div class="row"><div><div class="t">${a}</div><div class="s">${q} · comprato a ${fmt(p.prezzo_ingresso)}</div></div>
+      <div class="r"><div class="t">${fmt(v)}</div><div class="s ${r>=0?"up":"down"}">${r==null?"":pct(r)}</div></div></div>`;
+  }).join("") : `<div class="empty">Nessuna posizione: liquidità ${fmt(d.liquidita)}</div>`;
+
+  // segnali
+  const sEl=document.getElementById("segnali"), sk=Object.keys(sg);
+  sEl.innerHTML = sk.length ? sk.map(a=>{const s=sg[a];
+    return `<div class="row"><div><div class="t">${a} · ${fmt(s.prezzo)}</div><div class="s">RSI ${s.rsi} · EMA ${fmt(s.ema_veloce)} / ${fmt(s.ema_lenta)}</div></div>
+      <div class="r"><div class="t ${s.trend==="rialzo"?"up":"down"}">${s.trend==="rialzo"?"▲ rialzo":"▼ ribasso"}</div></div></div>`}).join("")
+    : `<div class="empty">Nessuna analisi ancora</div>`;
+
+  // strategia
+  const P=d.strategia, stEl=document.getElementById("strategia");
+  if(P){
+    const ore=P.intervallo_candele===60?"1 ora":"4 ore";
+    const crypto=(P.asset&&P.asset.length)?P.asset.join(", "):"nessuna: mercato sfavorevole, resta in liquidità";
+    const cl=P.classifica||{}, nomi=Object.keys(cl).sort((a,b)=>cl[b]["verifica_%"]-cl[a]["verifica_%"]);
+    stEl.innerHTML=`
+      <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra ${Object.keys(cl).length||"–"} analizzate</div></div><div class="r"><div class="t">${crypto}</div></div></div>
+      <div class="row"><div><div class="t">Regole</div><div class="s">candele ${ore} · EMA ${P.ema_veloce}/${P.ema_lenta} · RSI max ${P.rsi_max_ingresso}</div></div>
+        <div class="r"><div class="s">stop -${Math.round(P.stop_loss*100)}%<br>trailing -${Math.round(P.trailing_stop*100)}% dopo +${Math.round(P.attiva_trailing_dopo*100)}%</div></div></div>
+      <div class="row"><div><div class="t">Simulazione ultimi ${P.giorni_verifica||20} giorni</div><div class="s">${P.varianti_provate||"–"} varianti provate · ${P.aggiornata?dt(P.aggiornata):"non ancora ottimizzata"}</div></div>
+        <div class="r"><div class="t ${(P.rendimento_verifica||0)>=0?"up":"down"}">${P.rendimento_verifica==null?"–":pct(P.rendimento_verifica)}</div></div></div>
+      ${nomi.map(a=>`<div class="row"><div><div class="t">${a}${(P.asset||[]).includes(a)?" ✓":""}</div><div class="s">allenamento ${pct(cl[a]["allenamento_%"])}</div></div>
+        <div class="r"><div class="s ${cl[a]["verifica_%"]>=0?"up":"down"}">verifica ${pct(cl[a]["verifica_%"])}</div></div></div>`).join("")}`;
+  } else stEl.innerHTML=`<div class="empty">La prima analisi arriva al primo giro</div>`;
+
+  // storico
+  const lista=[...ops].reverse(), mostra=tutto?lista:lista.slice(0,15);
+  document.getElementById("storico").innerHTML = mostra.length ? mostra.map(o=>{
+    const buy=o.lato==="compra";
+    const ris=o.risultato!=null?`<div class="s ${o.risultato>=0?"up":"down"}">${o.risultato>=0?"+":""}${fmt(o.risultato)}</div>`:`<div class="s">comm. ${fmt(o.commissione)}</div>`;
+    return `<div class="row"><div><div class="t"><span class="pill ${buy?"buy":"sell"}">${buy?"COMPRA":"VENDE"}</span>${o.asset}</div>
+      <div class="s">${dt(o.t)} · a ${fmt(o.prezzo)} · ${o.motivo||""}</div></div>
+      <div class="r"><div class="t">${fmt(o.importo)}</div>${ris}</div></div>`;
+  }).join("") : `<div class="empty">Ancora nessun movimento</div>`;
+  const more=document.getElementById("more");
+  more.style.display = (!tutto && lista.length>15) ? "block":"none";
+
+  const errs=d.errori||[], eEl=document.getElementById("errore");
+  const recente = errs.length && (Date.now()-new Date(errs[errs.length-1].slice(0,25)).getTime() < 3600e3);
+  eEl.style.display = recente ? "block":"none";
+  if(recente) eEl.textContent="Ultimo errore: "+errs[errs.length-1];
+
+  document.getElementById("agg").textContent = d.aggiornato ? "Ultimo aggiornamento: "+new Date(d.aggiornato).toLocaleString("it-IT") : "";
+  try{ disegna(); }catch(e){ console.log("grafico non disponibile", e); }
+}
+
+function disegna(){
+  const eq=(dati.equity||[]).filter(p=>!giorni || p[0]>=Date.now()-giorni*864e5);
+  const labels=eq.map(p=>dt(p[0]));
+  const ds=[
+    {data:eq.map(p=>p[1]),borderColor:"#7c8cff",backgroundColor:"rgba(124,140,255,.12)",fill:true,tension:.25,pointRadius:0,borderWidth:2},
+    {data:eq.map(p=>p[2]),borderColor:"#f5b942",borderDash:[4,4],fill:false,tension:.25,pointRadius:0,borderWidth:1.5}
+  ];
+  if(chart){chart.data.labels=labels;chart.data.datasets.forEach((d,i)=>d.data=ds[i].data);chart.update("none");return;}
+  chart=new Chart(document.getElementById("grafico"),{type:"line",data:{labels,datasets:ds},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>(c.datasetIndex?"Solo BTC: ":"Bot: ")+fmt(c.parsed.y)}}},
+      scales:{x:{ticks:{color:"#8a94a6",maxTicksLimit:4,maxRotation:0},grid:{display:false}},
+        y:{ticks:{color:"#8a94a6",callback:v=>v+" €"},grid:{color:"#232a36"}}}}});
+}
+
+document.getElementById("tabs").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  document.querySelectorAll("#tabs button").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  giorni=+b.dataset.g; if(dati) disegna();
+});
+document.getElementById("more").onclick=()=>{tutto=true;render();};
+carica(); setInterval(carica,60000);
+</script>
+</body>
+</html>

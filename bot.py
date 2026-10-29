@@ -1,0 +1,846 @@
+"""
+Bot crypto per Revolut X - esperimento personale.
+
+Gira su GitHub Actions ogni 15 minuti:
+  1. legge i comandi Telegram
+  2. scarica prezzi e candele da Revolut X
+  3. applica la strategia (trend EMA + RSI, stop loss, trailing stop)
+  4. compra/vende con ordini market
+  5. salva tutto in data.json (letto dalla dashboard)
+
+Le chiavi NON stanno in questo file: arrivano dai "Secrets" di GitHub.
+"""
+
+import base64
+import json
+import os
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
+from zoneinfo import ZoneInfo
+
+import requests
+from cryptography.hazmat.primitives import serialization
+
+# ---------------------------------------------------------------------------
+# IMPOSTAZIONI DELLA STRATEGIA (puoi modificarle da GitHub)
+# ---------------------------------------------------------------------------
+CONFIG = {
+    "valuta": "EUR",                 # valuta del conto su Revolut X
+    "capitale_bot": 100.0,           # EUR di partenza. Il bot usa solo questi + i suoi guadagni:
+                                     # eventuali altri soldi sul conto non vengono mai toccati
+    # Strategia di partenza: ogni giorno il bot la ricalcola da solo (vedi "apprendimento" sotto)
+    "asset": ["BTC", "ETH"],         # crypto usate finché non fa la prima ottimizzazione
+    "intervallo_candele": 60,        # minuti per candela (60 = 1 ora)
+    "ema_veloce": 20,
+    "ema_lenta": 50,
+    "rsi_periodo": 14,
+    "rsi_max_ingresso": 70,          # non compra se RSI sopra (mercato "surriscaldato")
+    "stop_loss": 0.05,               # vende se scende del 5% dal prezzo di acquisto
+    "attiva_trailing_dopo": 0.03,    # dopo +3% di guadagno attiva il trailing stop
+    "trailing_stop": 0.03,           # ...e vende se scende del 3% dal massimo raggiunto
+    "ordine_minimo": 5.0,            # EUR, sotto questa cifra non apre ordini
+
+    # Apprendimento: ogni giorno riprova 108 varianti della strategia sugli ultimi 60 giorni
+    # di ogni crypto e adotta la migliore, solo se regge anche sui giorni più recenti
+    "asset_candidati": ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"],
+    "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
+    "ottimizza_ogni_ore": 24,
+    "giorni_storico": 60,
+    "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
+    "peso_rischio": 0.3,             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
+    "pausa_dopo_vendita_ore": 6,     # dopo una vendita aspetta prima di ricomprare la stessa crypto
+    "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
+    "ora_report": 21,                # ora (Italia) del resoconto giornaliero su Telegram
+}
+
+BASE = "https://revx.revolut.com"
+FUSO = ZoneInfo("Europe/Rome")
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+MAX_PUNTI = 8000
+
+API_KEY = os.environ.get("REVX_API_KEY", "").strip()
+PRIVATE_PEM = os.environ.get("REVX_PRIVATE_KEY", "").strip()
+TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+SOLO_TEST = os.environ.get("SOLO_TEST", "").strip().lower() in ("1", "true", "yes")
+REPO = os.environ.get("GITHUB_REPOSITORY", "")
+
+
+def ora_ms():
+    return int(time.time() * 1000)
+
+
+def ora_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def D(x):
+    return Decimal(str(x))
+
+
+def euro(x):
+    return f"{float(x):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def link_dashboard():
+    if "/" not in REPO:
+        return ""
+    owner, repo = REPO.split("/", 1)
+    return f"https://{owner.lower()}.github.io/{repo}/"
+
+
+# ---------------------------------------------------------------------------
+# CLIENT REVOLUT X
+# ---------------------------------------------------------------------------
+class RevX:
+    def __init__(self, api_key, private_pem):
+        if not api_key or not private_pem:
+            raise RuntimeError("Mancano REVX_API_KEY o REVX_PRIVATE_KEY nei Secrets di GitHub.")
+        pem = private_pem.replace("\\n", "\n")
+        if "BEGIN" not in pem:
+            raise RuntimeError("REVX_PRIVATE_KEY non sembra una chiave PEM valida.")
+        self.key = serialization.load_pem_private_key(pem.encode(), password=None)
+        self.api_key = api_key
+        self.s = requests.Session()
+
+    def _call(self, method, path, query="", body=None):
+        full_path = "/api/1.0" + path
+        body_str = json.dumps(body, separators=(",", ":")) if body is not None else ""
+        for tentativo in range(4):
+            ts = str(ora_ms())
+            msg = f"{ts}{method}{full_path}{query}{body_str}".encode()
+            firma = base64.b64encode(self.key.sign(msg)).decode()
+            headers = {
+                "X-Revx-API-Key": self.api_key,
+                "X-Revx-Timestamp": ts,
+                "X-Revx-Signature": firma,
+                "Accept": "application/json",
+            }
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            url = BASE + full_path + (("?" + query) if query else "")
+            r = self.s.request(method, url, headers=headers,
+                               data=body_str if body is not None else None, timeout=20)
+            if r.status_code == 429 or r.status_code >= 500:
+                attesa = int(r.headers.get("Retry-After", "2000")) / 1000 if r.status_code == 429 else 2
+                time.sleep(min(attesa, 10))
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"Errore Revolut X {r.status_code} su {path}: {r.text[:300]}")
+            if r.status_code == 204 or not r.text:
+                return None
+            return r.json()
+        raise RuntimeError(f"Revolut X non risponde su {path}")
+
+    def saldi(self):
+        res = self._call("GET", "/balances")
+        return {b["currency"]: b for b in res}
+
+    def coppie(self):
+        return self._call("GET", "/configuration/pairs")
+
+    def ticker(self, simboli):
+        res = self._call("GET", "/tickers", query="symbols=" + ",".join(simboli))
+        return {t["symbol"].replace("/", "-"): t for t in res["data"]}
+
+    def candele(self, simbolo, intervallo, quante=99):
+        adesso = ora_ms()
+        since = adesso - quante * intervallo * 60_000
+        q = f"interval={intervallo}&since={since}&until={adesso}"
+        res = self._call("GET", f"/candles/{simbolo}", query=q)
+        candele = sorted(res["data"], key=lambda c: c["start"])
+        # scarta la candela ancora aperta
+        return [c for c in candele if c["start"] + intervallo * 60_000 <= adesso]
+
+    def storico(self, simbolo, ore):
+        """Candele orarie degli ultimi `ore`, scaricate a blocchi da 100."""
+        fine = ora_ms() // 3_600_000 * 3_600_000
+        tutte = {}
+        while ore > 0:
+            blocco = min(ore, 100)
+            inizio = fine - blocco * 3_600_000
+            res = self._call("GET", f"/candles/{simbolo}", query=f"interval=60&since={inizio}&until={fine}")
+            for c in res["data"]:
+                tutte[c["start"]] = c
+            fine, ore = inizio, ore - blocco
+        adesso = ora_ms()
+        return [tutte[k] for k in sorted(tutte) if k + 3_600_000 <= adesso]
+
+    def ordine_market(self, simbolo, lato, quote_size=None, base_size=None):
+        conf = {"quote_size": quote_size} if quote_size else {"base_size": base_size}
+        body = {
+            "client_order_id": str(uuid.uuid4()),
+            "symbol": simbolo,
+            "side": lato,
+            "order_configuration": {"market": conf},
+        }
+        res = self._call("POST", "/orders", body=body)
+        oid = res["data"]["venue_order_id"]
+        dettagli = None
+        for _ in range(8):
+            time.sleep(1)
+            dettagli = self._call("GET", f"/orders/{oid}")["data"]
+            if dettagli.get("status") in ("filled", "cancelled", "rejected"):
+                break
+        return dettagli
+
+
+# ---------------------------------------------------------------------------
+# INDICATORI
+# ---------------------------------------------------------------------------
+def ema(valori, periodo):
+    k = 2 / (periodo + 1)
+    e = sum(valori[:periodo]) / periodo
+    for v in valori[periodo:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def rsi(valori, periodo=14):
+    if len(valori) <= periodo:
+        return 50.0
+    guadagni, perdite = 0.0, 0.0
+    for i in range(1, periodo + 1):
+        d = valori[i] - valori[i - 1]
+        guadagni += max(d, 0)
+        perdite += max(-d, 0)
+    mg, mp = guadagni / periodo, perdite / periodo
+    for i in range(periodo + 1, len(valori)):
+        d = valori[i] - valori[i - 1]
+        mg = (mg * (periodo - 1) + max(d, 0)) / periodo
+        mp = (mp * (periodo - 1) + max(-d, 0)) / periodo
+    if mp == 0:
+        return 100.0
+    return 100 - 100 / (1 + mg / mp)
+
+
+def chiusure(candele_orarie, minuti):
+    """Chiusure alla risoluzione voluta (60 = 1h, 240 = 4h), solo candele complete."""
+    if minuti == 60:
+        return [float(c["close"]) for c in candele_orarie]
+    per, gruppi = minuti // 60, {}
+    for c in candele_orarie:
+        gruppi.setdefault(c["start"] // (minuti * 60_000), []).append(c)
+    return [float(sorted(g, key=lambda x: x["start"])[-1]["close"])
+            for k, g in sorted(gruppi.items()) if len(g) == per]
+
+
+def serie_ema(v, p):
+    out = [None] * len(v)
+    if len(v) < p:
+        return out
+    e = sum(v[:p]) / p
+    out[p - 1] = e
+    k = 2 / (p + 1)
+    for i in range(p, len(v)):
+        e = v[i] * k + e * (1 - k)
+        out[i] = e
+    return out
+
+
+def serie_rsi(v, p=14):
+    out = [None] * len(v)
+    if len(v) <= p:
+        return out
+    g = sum(max(v[i] - v[i - 1], 0) for i in range(1, p + 1)) / p
+    l = sum(max(v[i - 1] - v[i], 0) for i in range(1, p + 1)) / p
+    out[p] = 100 if l == 0 else 100 - 100 / (1 + g / l)
+    for i in range(p + 1, len(v)):
+        d = v[i] - v[i - 1]
+        g = (g * (p - 1) + max(d, 0)) / p
+        l = (l * (p - 1) + max(-d, 0)) / p
+        out[i] = 100 if l == 0 else 100 - 100 / (1 + g / l)
+    return out
+
+
+def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
+    """Simula la strategia sulle candele [da, a). Ritorna (rendimento, calo massimo, n. operazioni)."""
+    cap, pos, entrata, picco = 1.0, False, 0.0, 0.0
+    ultima_uscita, max_eq, max_calo, n = -10**9, 1.0, 0.0, 0
+    for i in range(max(da, 1), a):
+        if ef[i] is None or el[i] is None or rs[i] is None:
+            continue
+        p = c[i]
+        if pos:
+            picco = max(picco, p)
+            if (p <= entrata * (1 - P["stop_loss"])
+                    or (picco >= entrata * (1 + P["attiva_trailing_dopo"]) and p <= picco * (1 - P["trailing_stop"]))
+                    or ef[i] < el[i]):
+                cap *= p / entrata * (1 - costo)
+                pos, ultima_uscita, n = False, i, n + 1
+            eq = cap * p / entrata if pos else cap
+        else:
+            if ef[i] > el[i] and p > el[i] and rs[i] < P["rsi_max_ingresso"] and i - ultima_uscita >= pausa_barre:
+                cap *= 1 - costo
+                pos, entrata, picco = True, p, p
+            eq = cap
+        max_eq = max(max_eq, eq)
+        max_calo = max(max_calo, 1 - eq / max_eq)
+    if pos:
+        cap *= c[a - 1] / entrata * (1 - costo)
+        n += 1
+    return cap - 1, max_calo, n
+
+
+def griglia():
+    for intervallo in (60, 240):
+        for ev, el in ((9, 21), (12, 26), (20, 50)):
+            for rmax in (65, 75):
+                for sl in (0.03, 0.05, 0.08):
+                    for tr, att in ((0.02, 0.02), (0.03, 0.03), (0.04, 0.05)):
+                        yield {"intervallo_candele": intervallo, "ema_veloce": ev, "ema_lenta": el,
+                               "rsi_max_ingresso": rmax, "stop_loss": sl,
+                               "trailing_stop": tr, "attiva_trailing_dopo": att}
+
+
+def chiave(P):
+    return tuple(P[k] for k in ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
+                                "stop_loss", "trailing_stop", "attiva_trailing_dopo"))
+
+
+def strategia_iniziale():
+    P = {k: CONFIG[k] for k in ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
+                                "stop_loss", "trailing_stop", "attiva_trailing_dopo")}
+    P.update({"asset": list(CONFIG["asset"]), "aggiornata": None, "origine": "impostazioni iniziali"})
+    return P
+
+
+def ottimizza(api, dati, coppie):
+    """Apprendimento: riprova tutte le varianti sugli ultimi giorni e tiene la migliore.
+    Allenamento sui primi 2/3 del periodo, verifica sull'ultimo 1/3 (dati che la scelta non ha visto)."""
+    valuta, costo = CONFIG["valuta"], CONFIG["costo_per_operazione"]
+    candidati = [a for a in CONFIG["asset_candidati"]
+                 if coppie.get(f"{a}/{valuta}", {}).get("status", "active") == "active" and f"{a}/{valuta}" in coppie]
+    storici = {}
+    for a in candidati:
+        try:
+            st = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico"] * 24)
+            if len(st) >= 24 * 20:
+                storici[a] = st
+        except Exception as e:
+            print("storico", a, e)
+    if not storici:
+        return None
+
+    # indicatori calcolati una volta per crypto e risoluzione
+    prep = {}
+    for a, st in storici.items():
+        for intervallo in (60, 240):
+            c = chiusure(st, intervallo)
+            prep[(a, intervallo)] = {"c": c, "rsi": serie_rsi(c, CONFIG["rsi_periodo"]),
+                                     "ema": {p: serie_ema(c, p) for p in (9, 12, 20, 21, 26, 50)}}
+
+    def valuta_P(P):
+        risultati = {}
+        for a in storici:
+            d = prep[(a, P["intervallo_candele"])]
+            n = len(d["c"])
+            taglio = n * 2 // 3
+            pausa = max(1, -(-CONFIG["pausa_dopo_vendita_ore"] * 60 // P["intervallo_candele"]))
+            args = (d["c"], d["ema"][P["ema_veloce"]], d["ema"][P["ema_lenta"]], d["rsi"], P)
+            r_tr, dd_tr, n_tr = backtest(*args, 0, taglio, costo, pausa)
+            r_va, dd_va, n_va = backtest(*args, taglio, n, costo, pausa)
+            risultati[a] = {"train": r_tr - CONFIG["peso_rischio"] * dd_tr, "verifica": r_va - CONFIG["peso_rischio"] * dd_va,
+                            "rend_train": r_tr, "rend_verifica": r_va, "operazioni": n_tr + n_va}
+        # le crypto migliori in allenamento, ma solo se guadagnano anche nella verifica
+        ordinate = sorted(risultati, key=lambda a: risultati[a]["train"], reverse=True)
+        scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0][:CONFIG["max_asset_attivi"]]
+        top = ordinate[:CONFIG["max_asset_attivi"]]
+        punteggio_train = sum(risultati[a]["train"] for a in top) / len(top)
+        punteggio_ver = (sum(risultati[a]["verifica"] for a in scelte) / len(scelte)) if scelte else -1
+        return punteggio_train, punteggio_ver, scelte, risultati
+
+    # punteggio: media tra allenamento e verifica, così premia chi va bene in entrambi i periodi
+    migliore = None
+    for P in griglia():
+        tr, ve, scelte, ris = valuta_P(P)
+        if ve <= 0:
+            continue
+        if migliore is None or (tr + ve) / 2 > (migliore[0] + migliore[1]) / 2:
+            migliore = (tr, ve, scelte, ris, P)
+
+    attuale = dati.get("strategia") or strategia_iniziale()
+    tr_a, ve_a, scelte_a, ris_a = valuta_P(attuale)
+
+    # cambia strategia solo se quella nuova è davvero migliore (margine minimo per non cambiare a caso)
+    if migliore and (migliore[0] + migliore[1]) / 2 > (tr_a + ve_a) / 2 + 0.002:
+        tr, ve, scelte, ris, P = migliore
+        origine = "ottimizzazione"
+    else:
+        tr, ve, scelte, ris, P = tr_a, ve_a, scelte_a, ris_a, {k: attuale[k] for k in chiave_nomi()}
+        origine = attuale.get("origine", "impostazioni iniziali") if attuale.get("aggiornata") else "confermata"
+
+    nuova = dict(P)
+    nuova.update({
+        "asset": scelte, "aggiornata": ora_ms(), "origine": origine,
+        "rendimento_verifica": round(sum(ris[a]["rend_verifica"] for a in scelte) / len(scelte) * 100, 2) if scelte else None,
+        "giorni_verifica": CONFIG["giorni_storico"] // 3,
+        "classifica": {a: {"verifica_%": round(ris[a]["rend_verifica"] * 100, 2),
+                           "allenamento_%": round(ris[a]["rend_train"] * 100, 2)} for a in ris},
+        "varianti_provate": sum(1 for _ in griglia()),
+    })
+    cambiata = chiave(nuova) != chiave(attuale) or nuova["asset"] != attuale.get("asset")
+    dati["strategia"] = nuova
+    dati.setdefault("storia_strategie", []).append({"t": ora_ms(), "asset": scelte, "parametri": list(chiave(nuova)),
+                                                    "rendimento_verifica": nuova["rendimento_verifica"]})
+    dati["storia_strategie"] = dati["storia_strategie"][-60:]
+    return nuova, cambiata
+
+
+def chiave_nomi():
+    return ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
+            "stop_loss", "trailing_stop", "attiva_trailing_dopo")
+
+
+def descrivi_strategia(P):
+    ore = "1 ora" if P["intervallo_candele"] == 60 else "4 ore"
+    crypto = ", ".join(P["asset"]) if P["asset"] else "nessuna (mercato sfavorevole: resta in liquidità)"
+    righe = [f"<b>Crypto:</b> {crypto}",
+             f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
+             f"<b>Stop loss:</b> -{P['stop_loss']*100:.0f}% · <b>trailing:</b> -{P['trailing_stop']*100:.0f}% dopo +{P['attiva_trailing_dopo']*100:.0f}%"]
+    if P.get("rendimento_verifica") is not None:
+        righe.append(f"<b>Test sugli ultimi {P.get('giorni_verifica', 20)} giorni:</b> {P['rendimento_verifica']:+.2f}% (simulazione al netto dei costi, non è una promessa)")
+    return "\n".join(righe)
+
+
+def arrotonda_giu(valore, passo):
+    passo = D(passo)
+    return (D(valore) / passo).to_integral_value(rounding=ROUND_DOWN) * passo
+
+
+# ---------------------------------------------------------------------------
+# DATI
+# ---------------------------------------------------------------------------
+def carica_dati():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def salva_dati(d):
+    d["aggiornato"] = ora_iso()
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+
+
+def default_dati():
+    return {
+        "versione": 1,
+        "valuta": CONFIG["valuta"],
+        "inizio": None,
+        "capitale_iniziale": None,
+        "prezzo_btc_iniziale": None,
+        "stato": "attivo",          # attivo | in pausa | fermato
+        "base_emergenza": None,
+        "posizioni": {},            # asset -> {qty, costo, prezzo_ingresso, picco, dal}
+        "ultima_vendita": {},       # asset -> timestamp ms
+        "operazioni": [],
+        "equity": [],               # [t_ms, valore, benchmark_btc]
+        "segnali": {},
+        "capitale_bot": None,
+        "strategia": None,          # parametri attuali, ricalcolati ogni giorno       # 100 € + guadagni - perdite: il massimo che il bot può usare
+        "tg_offset": 0,
+        "ultimo_report": None,
+        "config": CONFIG,
+        "errori": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# TELEGRAM
+# ---------------------------------------------------------------------------
+def tg_invia(testo):
+    if not TG_TOKEN or not TG_CHAT:
+        print("[telegram]", testo)
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                      json={"chat_id": TG_CHAT, "text": testo, "parse_mode": "HTML",
+                            "disable_web_page_preview": True}, timeout=15)
+    except Exception as e:
+        print("Telegram non raggiungibile:", e)
+
+
+def tg_comandi(dati):
+    if not TG_TOKEN:
+        return []
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                         params={"offset": dati.get("tg_offset", 0) + 1, "timeout": 0}, timeout=15)
+        aggiornamenti = r.json().get("result", [])
+    except Exception as e:
+        print("Telegram non raggiungibile:", e)
+        return []
+    comandi = []
+    for u in aggiornamenti:
+        dati["tg_offset"] = max(dati.get("tg_offset", 0), u["update_id"])
+        m = u.get("message") or {}
+        if str(m.get("chat", {}).get("id")) != TG_CHAT:
+            continue
+        testo = (m.get("text") or "").strip().split("@")[0].lower()
+        if testo.startswith("/"):
+            comandi.append(testo.split()[0])
+    return comandi
+
+
+# ---------------------------------------------------------------------------
+# LOGICA PRINCIPALE
+# ---------------------------------------------------------------------------
+def valuta_portafoglio(saldi, prezzi, valuta):
+    """Valore dell'intero conto Revolut X (usato solo all'avvio)."""
+    totale = D(saldi.get(valuta, {}).get("total", "0"))
+    for a in CONFIG["asset"]:
+        qty = D(saldi.get(a, {}).get("total", "0"))
+        sim = f"{a}-{valuta}"
+        if qty > 0 and sim in prezzi:
+            totale += qty * D(prezzi[sim]["bid"])
+    return totale
+
+
+def liquidita_bot(dati):
+    """Euro del bot non investiti: capitale del bot (100 € + guadagni - perdite) meno il costo delle posizioni."""
+    return max(0.0, dati["capitale_bot"] - sum(p["costo"] for p in dati["posizioni"].values()))
+
+
+def valore_bot(dati, prezzi, valuta):
+    """Valore dei soli soldi del bot: la sua liquidità + le crypto che ha comprato, ai prezzi attuali."""
+    totale = liquidita_bot(dati)
+    for a, p in dati["posizioni"].items():
+        sim = f"{a}-{valuta}"
+        if sim in prezzi:
+            totale += float(p["qty"]) * float(prezzi[sim]["bid"])
+    return D(round(totale, 2))
+
+
+def riepilogo(dati, valore, dettagliato=False):
+    ini = dati.get("capitale_iniziale") or 0
+    diff = float(valore) - ini
+    perc = (diff / ini * 100) if ini else 0
+    segno = "+" if diff >= 0 else ""
+    righe = [
+        f"<b>Stato:</b> {dati['stato']}",
+        f"<b>Valore attuale:</b> {euro(valore)}",
+        f"<b>Capitale iniziale:</b> {euro(ini)}",
+        f"<b>Risultato:</b> {segno}{euro(diff)} ({segno}{perc:.2f}%)",
+    ]
+    if dati["equity"]:
+        bench = dati["equity"][-1][2]
+        if bench:
+            righe.append(f"<b>Se avessi solo tenuto BTC:</b> {euro(bench)}")
+    if dati["posizioni"]:
+        for a, p in dati["posizioni"].items():
+            righe.append(f"• {a}: {p['qty']} (comprato a {euro(p['prezzo_ingresso'])})")
+    else:
+        righe.append("• Nessuna posizione aperta, tutto in liquidità")
+    if dettagliato and dati.get("strategia"):
+        righe.append("\n🧠 <b>Strategia</b>\n" + descrivi_strategia(dati["strategia"]))
+    if dettagliato and dati["operazioni"]:
+        righe.append("\n<b>Ultime operazioni:</b>")
+        for op in dati["operazioni"][-5:]:
+            t = datetime.fromtimestamp(op["t"] / 1000, FUSO).strftime("%d/%m %H:%M")
+            righe.append(f"{t} {op['lato'].upper()} {op['asset']} {euro(op['importo'])}")
+    link = link_dashboard()
+    if link:
+        righe.append(f"\n📊 {link}")
+    return "\n".join(righe)
+
+
+def registra_operazione(dati, asset, lato, det, prezzo_rif, motivo):
+    qty = D(det.get("filled_quantity") or "0")
+    importo = D(det.get("filled_amount") or "0")
+    prezzo = D(det.get("average_fill_price") or prezzo_rif)
+    if importo == 0 and qty > 0:
+        importo = qty * prezzo
+    fee = D(det.get("total_fee") or "0")
+    fee_val = det.get("fee_currency") or CONFIG["valuta"]
+    fee_eur = fee if fee_val == CONFIG["valuta"] else fee * prezzo
+    op = {
+        "t": ora_ms(), "asset": asset, "lato": lato, "qty": str(qty),
+        "prezzo": float(prezzo), "importo": float(importo), "commissione": float(fee_eur),
+        "motivo": motivo, "stato_ordine": det.get("status"),
+    }
+    return op, qty, importo, prezzo, fee_eur
+
+
+def compra(api, dati, asset, eur, prezzo_rif, coppie, motivo):
+    sim = f"{asset}-{CONFIG['valuta']}"
+    conf = coppie.get(f"{asset}/{CONFIG['valuta']}", {})
+    quote = arrotonda_giu(eur, conf.get("quote_step", "0.01"))
+    if quote < D(conf.get("min_order_size_quote", CONFIG["ordine_minimo"])) or quote < D(CONFIG["ordine_minimo"]):
+        return None
+    det = api.ordine_market(sim, "buy", quote_size=str(quote))
+    if not det or det.get("status") == "rejected":
+        tg_invia(f"⚠️ Acquisto {asset} rifiutato: {det.get('reject_reason') if det else 'nessuna risposta'}")
+        return None
+    op, qty, importo, prezzo, fee = registra_operazione(dati, asset, "compra", det, prezzo_rif, motivo)
+    if qty <= 0:
+        return None
+    dati["operazioni"].append(op)
+    dati["posizioni"][asset] = {
+        "qty": str(qty), "costo": float(importo + (fee if det.get("fee_currency") == CONFIG["valuta"] else 0)),
+        "prezzo_ingresso": float(prezzo), "picco": float(prezzo), "dal": ora_ms(),
+    }
+    tg_invia(f"🟢 <b>COMPRATO {asset}</b>\n{qty} a {euro(prezzo)}\nSpesa: {euro(importo)} · commissione {euro(fee)}\nMotivo: {motivo}")
+    return op
+
+
+def vendi(api, dati, asset, qty_disp, prezzo_rif, coppie, motivo):
+    sim = f"{asset}-{CONFIG['valuta']}"
+    conf = coppie.get(f"{asset}/{CONFIG['valuta']}", {})
+    qty = arrotonda_giu(qty_disp, conf.get("base_step", "0.00000001"))
+    if qty <= 0 or qty < D(conf.get("min_order_size", "0")):
+        dati["posizioni"].pop(asset, None)
+        return None
+    det = api.ordine_market(sim, "sell", base_size=str(qty))
+    if not det or det.get("status") == "rejected":
+        tg_invia(f"⚠️ Vendita {asset} rifiutata: {det.get('reject_reason') if det else 'nessuna risposta'}")
+        return None
+    op, qty_v, importo, prezzo, fee = registra_operazione(dati, asset, "vendi", det, prezzo_rif, motivo)
+    pos = dati["posizioni"].pop(asset, None)
+    if pos:
+        risultato = float(importo) - float(fee) - pos["costo"]
+        op["risultato"] = round(risultato, 2)
+        # guadagni e perdite cambiano il capitale che il bot può usare
+        dati["capitale_bot"] = round(dati["capitale_bot"] + risultato, 2)
+    dati["operazioni"].append(op)
+    dati["ultima_vendita"][asset] = ora_ms()
+    r = op.get("risultato")
+    extra = f"\nRisultato: {'+' if r >= 0 else ''}{euro(r)}" if r is not None else ""
+    tg_invia(f"🔴 <b>VENDUTO {asset}</b>\n{qty_v} a {euro(prezzo)}\nIncasso: {euro(importo)} · commissione {euro(fee)}{extra}\nMotivo: {motivo}")
+    return op
+
+
+def qty_vendibile(dati, saldi, a):
+    """Vende solo le crypto comprate dal bot, mai altre che hai sul conto."""
+    pos = dati["posizioni"].get(a)
+    if not pos:
+        return D("0")
+    return min(D(saldi.get(a, {}).get("available", "0")), D(pos["qty"]))
+
+
+def vendi_tutto(api, dati, saldi, prezzi, coppie, motivo):
+    for a in list(dati["posizioni"].keys()):
+        qty = qty_vendibile(dati, saldi, a)
+        sim = f"{a}-{CONFIG['valuta']}"
+        if qty > 0 and sim in prezzi:
+            vendi(api, dati, a, qty, prezzi[sim]["bid"], coppie, motivo)
+
+
+def main():
+    dati = carica_dati() or default_dati()
+    for k, v in default_dati().items():
+        dati.setdefault(k, v)
+    dati["config"] = CONFIG
+    valuta = CONFIG["valuta"]
+    if not dati.get("strategia"):
+        dati["strategia"] = strategia_iniziale()
+
+    def simboli_utili():
+        nomi = set(dati["strategia"]["asset"]) | set(dati["posizioni"]) | set(CONFIG["asset"]) | {"BTC"}
+        return sorted(f"{a}-{valuta}" for a in nomi)
+
+    comandi = tg_comandi(dati)
+    api = RevX(API_KEY, PRIVATE_PEM)
+
+    saldi = api.saldi()
+    coppie = api.coppie()
+    prezzi = api.ticker(simboli_utili())
+    valore = valuta_portafoglio(saldi, prezzi, valuta)
+    prezzo_btc = float(prezzi[f"BTC-{valuta}"]["mid"])
+
+    if SOLO_TEST:
+        msg = "✅ <b>Connessione a Revolut X riuscita</b>\n"
+        for c, b in saldi.items():
+            if D(b.get("total", "0")) > 0:
+                msg += f"• {c}: {b['total']}\n"
+        msg += f"Valore totale del conto: {euro(valore)}\nIl bot userà al massimo: {euro(min(float(valore), CONFIG['capitale_bot']))}\nPrezzo BTC: {euro(prezzo_btc)}\n(test: nessun ordine eseguito)"
+        tg_invia(msg)
+        salva_dati(dati)
+        return
+
+    # inizializzazione al primo avvio con soldi sul conto
+    if not dati.get("capitale_iniziale"):
+        if valore < D(CONFIG["ordine_minimo"]):
+            print("Conto vuoto: in attesa del deposito.")
+            salva_dati(dati)
+            return
+        iniziale = round(min(float(D(saldi.get(valuta, {}).get("available", "0"))), CONFIG["capitale_bot"]), 2)
+        if iniziale < CONFIG["ordine_minimo"]:
+            print("Euro non sufficienti su Revolut X: in attesa del deposito.")
+            salva_dati(dati)
+            return
+        dati["capitale_iniziale"] = iniziale
+        dati["capitale_bot"] = iniziale
+        dati["inizio"] = ora_ms()
+        dati["prezzo_btc_iniziale"] = prezzo_btc
+        dati["base_emergenza"] = iniziale
+        tg_invia(f"🚀 <b>Bot avviato</b>\nCapitale del bot: {euro(iniziale)}\n"
+                 "Userà solo questi soldi e i loro guadagni, mai altre ricariche.\nScrivi /aiuto per i comandi.")
+    if dati.get("capitale_bot") is None:
+        dati["capitale_bot"] = dati["capitale_iniziale"]
+
+    # controlla che le crypto del bot ci siano ancora (se le vendi a mano, il bot lo registra)
+    for a in list(dati["posizioni"].keys()):
+        pos = dati["posizioni"][a]
+        sim = f"{a}-{valuta}"
+        saldo = D(saldi.get(a, {}).get("total", "0"))
+        if saldo < D(pos["qty"]):
+            if sim in prezzi and saldo * D(prezzi[sim]["bid"]) >= D("1"):
+                pos["qty"] = str(saldo)
+            else:
+                # venduta fuori dal bot: chiude la posizione al prezzo attuale
+                if sim in prezzi:
+                    ricavo = float(pos["qty"]) * float(prezzi[sim]["bid"])
+                    dati["capitale_bot"] = round(dati["capitale_bot"] + ricavo - pos["costo"], 2)
+                dati["posizioni"].pop(a)
+
+    # apprendimento: ricalcola la strategia una volta al giorno (o su comando /ottimizza)
+    scaduta = (not dati["strategia"].get("aggiornata") or
+               ora_ms() - dati["strategia"]["aggiornata"] > CONFIG["ottimizza_ogni_ore"] * 3_600_000)
+    if scaduta or "/ottimizza" in comandi:
+        try:
+            esito = ottimizza(api, dati, coppie)
+            if esito:
+                nuova, cambiata = esito
+                if cambiata or "/ottimizza" in comandi:
+                    tg_invia(("🧠 <b>Strategia aggiornata</b>\n" if cambiata else "🧠 <b>Strategia confermata</b>\n")
+                             + descrivi_strategia(nuova))
+                prezzi = api.ticker(simboli_utili())
+        except Exception as e:
+            dati["errori"] = (dati["errori"] + [f"{ora_iso()} ottimizzazione: {e}"])[-20:]
+    P = dati["strategia"]
+
+    valore = valore_bot(dati, prezzi, valuta)
+
+    # comandi telegram
+    for c in comandi:
+        if c in ("/start", "/aiuto", "/help"):
+            tg_invia("<b>Comandi</b>\n/stato – situazione attuale\n/report – situazione + ultime operazioni\n"
+                     "/pausa – niente nuovi acquisti (stop loss resta attivo)\n/riprendi – riattiva il bot\n"
+                     "/vendi_tutto – vende tutto e mette in pausa\n/strategia – strategia attuale\n"
+                     "/ottimizza – ricalcola subito la strategia")
+        elif c == "/strategia":
+            tg_invia("🧠 <b>Strategia attuale</b>\n" + descrivi_strategia(P))
+        elif c == "/stato":
+            tg_invia(riepilogo(dati, valore))
+        elif c == "/report":
+            tg_invia(riepilogo(dati, valore, dettagliato=True))
+        elif c == "/pausa":
+            dati["stato"] = "in pausa"
+            tg_invia("⏸ Bot in pausa: nessun nuovo acquisto. Le protezioni sulle posizioni aperte restano attive.")
+        elif c == "/riprendi":
+            dati["stato"] = "attivo"
+            dati["base_emergenza"] = float(valore)
+            tg_invia("▶️ Bot riattivato.")
+        elif c == "/vendi_tutto":
+            vendi_tutto(api, dati, saldi, prezzi, coppie, "comando manuale")
+            dati["stato"] = "in pausa"
+            tg_invia("🛑 Venduto tutto. Bot in pausa: scrivi /riprendi per riattivarlo.")
+            saldi = api.saldi()
+
+    # freno di emergenza
+    base = dati.get("base_emergenza") or dati["capitale_iniziale"]
+    if dati["stato"] != "fermato" and float(valore) < base * CONFIG["soglia_emergenza"]:
+        vendi_tutto(api, dati, saldi, prezzi, coppie, "freno di emergenza")
+        dati["stato"] = "fermato"
+        tg_invia(f"🚨 <b>Freno di emergenza</b>: il capitale è sceso sotto il {int(CONFIG['soglia_emergenza']*100)}%. "
+                 "Ho venduto tutto e fermato il bot. Scrivi /riprendi se vuoi ripartire.")
+        saldi = api.saldi()
+
+    # strategia
+    if dati["stato"] != "fermato":
+        dati["segnali"] = {k: v for k, v in dati["segnali"].items() if k in set(P["asset"]) | set(dati["posizioni"])}
+        for a in sorted(set(P["asset"]) | set(dati["posizioni"])):
+            sim = f"{a}-{valuta}"
+            if sim not in prezzi:
+                continue
+            try:
+                ore = (P["ema_lenta"] + 40) * P["intervallo_candele"] // 60
+                ch = chiusure(api.storico(sim, ore), P["intervallo_candele"])
+            except Exception as e:
+                dati["errori"] = (dati["errori"] + [f"{ora_iso()} candele {a}: {e}"])[-20:]
+                continue
+            if len(ch) < P["ema_lenta"] + 5:
+                continue
+            ef, el = ema(ch, P["ema_veloce"]), ema(ch, P["ema_lenta"])
+            r = rsi(ch, CONFIG["rsi_periodo"])
+            bid, ask = float(prezzi[sim]["bid"]), float(prezzi[sim]["ask"])
+            trend_su = ef > el and ch[-1] > el
+            dati["segnali"][a] = {"prezzo": bid, "ema_veloce": round(ef, 2), "ema_lenta": round(el, 2),
+                                  "rsi": round(r, 1), "trend": "rialzo" if trend_su else "ribasso", "t": ora_ms()}
+
+            pos = dati["posizioni"].get(a)
+            if pos:
+                pos["picco"] = max(pos["picco"], bid)
+                ingresso = pos["prezzo_ingresso"]
+                motivo = None
+                if bid <= ingresso * (1 - P["stop_loss"]):
+                    motivo = f"stop loss (-{P['stop_loss']*100:.0f}%)"
+                elif pos["picco"] >= ingresso * (1 + P["attiva_trailing_dopo"]) and \
+                        bid <= pos["picco"] * (1 - P["trailing_stop"]):
+                    motivo = "trailing stop: protegge il guadagno"
+                elif ef < el:
+                    motivo = "trend girato al ribasso"
+                if motivo:
+                    qty = qty_vendibile(dati, saldi, a)
+                    vendi(api, dati, a, qty, bid, coppie, motivo)
+                    saldi = api.saldi()
+            elif a in P["asset"] and dati["stato"] == "attivo" and trend_su and r < P["rsi_max_ingresso"]:
+                pausa = CONFIG["pausa_dopo_vendita_ore"] * 3_600_000
+                if ora_ms() - dati["ultima_vendita"].get(a, 0) < pausa:
+                    continue
+                # usa solo la liquidità del bot (100 € + guadagni), mai altri euro del conto
+                disponibile = min(float(saldi.get(valuta, {}).get("available", "0")), liquidita_bot(dati))
+                quota = 1 / max(1, len(P["asset"]))
+                importo = min(disponibile, dati["capitale_bot"] * quota) * 0.995
+                if importo >= CONFIG["ordine_minimo"]:
+                    compra(api, dati, a, importo, ask, coppie,
+                           f"trend in rialzo (EMA{P['ema_veloce']} sopra EMA{P['ema_lenta']}), RSI {r:.0f}")
+                    saldi = api.saldi()
+
+    # valore finale e curva
+    prezzi = api.ticker(list(prezzi.keys()))
+    valore = valore_bot(dati, prezzi, valuta)
+    prezzo_btc = float(prezzi[f"BTC-{valuta}"]["mid"])
+    bench = dati["capitale_iniziale"] * prezzo_btc / dati["prezzo_btc_iniziale"]
+    dati["equity"].append([ora_ms(), round(float(valore), 2), round(bench, 2)])
+    if len(dati["equity"]) > MAX_PUNTI:
+        meta = len(dati["equity"]) // 2
+        dati["equity"] = dati["equity"][:meta:2] + dati["equity"][meta:]
+    dati["valore_attuale"] = round(float(valore), 2)
+    dati["liquidita"] = round(liquidita_bot(dati), 2)
+
+    # report serale
+    adesso = datetime.now(FUSO)
+    oggi = adesso.strftime("%Y-%m-%d")
+    if adesso.hour >= CONFIG["ora_report"] and dati.get("ultimo_report") != oggi:
+        dati["ultimo_report"] = oggi
+        tg_invia("🌙 <b>Resoconto del giorno</b>\n" + riepilogo(dati, valore, dettagliato=True))
+
+    salva_dati(dati)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print("ERRORE:", e)
+        avvisa = True
+        try:
+            d = carica_dati()
+            if d:
+                d["errori"] = (d.get("errori", []) + [f"{ora_iso()} {e}"])[-20:]
+                # al massimo un avviso di errore ogni 3 ore, per non intasare Telegram
+                avvisa = ora_ms() - d.get("ultimo_avviso_errore", 0) > 3 * 3_600_000
+                if avvisa:
+                    d["ultimo_avviso_errore"] = ora_ms()
+                salva_dati(d)
+        except Exception:
+            pass
+        if avvisa:
+            tg_invia(f"⚠️ Errore del bot: {str(e)[:300]}")
+        sys.exit(1)

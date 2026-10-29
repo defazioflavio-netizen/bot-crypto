@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genera chiavi</title>
+<style>
+  body{margin:0;background:#0b0d12;color:#e9edf3;font:15px/1.45 -apple-system,system-ui,sans-serif;padding:20px 16px 40px}
+  .wrap{max-width:640px;margin:0 auto}
+  h1{font-size:21px;margin:0 0 6px}
+  p{color:#a7b0c0}
+  button{width:100%;border:0;border-radius:12px;padding:14px;font-size:16px;font-weight:650;background:#7c8cff;color:#fff;margin:8px 0}
+  button.sec{background:#232a36}
+  .box{background:#151922;border-radius:14px;padding:14px;margin:14px 0}
+  .box h2{font-size:15px;margin:0 0 6px}
+  textarea{width:100%;height:110px;background:#0b0d12;color:#e9edf3;border:1px solid #232a36;border-radius:10px;padding:10px;font:12px ui-monospace,Menlo,monospace;resize:none}
+  .warn{background:rgba(239,68,68,.12);color:#fca5a5;border-radius:12px;padding:12px;font-size:13px}
+  .ok{color:#22c55e;font-size:13px;min-height:18px}
+  #out{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Genera le chiavi per Revolut X</h1>
+  <p>Le chiavi vengono create qui, sul tuo iPhone. Non vengono inviate da nessuna parte.</p>
+  <button id="gen">Genera chiavi</button>
+  <div id="msg" class="ok"></div>
+
+  <div id="out">
+    <div class="box">
+      <h2>1 · Chiave PUBBLICA → va su Revolut X</h2>
+      <textarea id="pub" readonly></textarea>
+      <button class="sec" data-copy="pub">Copia chiave pubblica</button>
+    </div>
+    <div class="box">
+      <h2>2 · Chiave PRIVATA → va solo nei Secrets di GitHub</h2>
+      <textarea id="priv" readonly></textarea>
+      <button class="sec" data-copy="priv">Copia chiave privata</button>
+      <div class="warn">La chiave privata dà accesso al conto: non mandarla a nessuno, non incollarla in chat o in file. Incollala solo nel Secret <b>REVX_PRIVATE_KEY</b> su GitHub. Se chiudi questa pagina prima di salvarla, rigenera tutto e ricomincia.</div>
+    </div>
+  </div>
+</div>
+<script>
+const pem=(buf,tipo)=>{
+  const b64=btoa(String.fromCharCode(...new Uint8Array(buf)));
+  return `-----BEGIN ${tipo} KEY-----\n${b64.match(/.{1,64}/g).join("\n")}\n-----END ${tipo} KEY-----`;
+};
+document.getElementById("gen").onclick=async()=>{
+  const msg=document.getElementById("msg");
+  try{
+    const k=await crypto.subtle.generateKey({name:"Ed25519"},true,["sign","verify"]);
+    document.getElementById("priv").value=pem(await crypto.subtle.exportKey("pkcs8",k.privateKey),"PRIVATE");
+    document.getElementById("pub").value=pem(await crypto.subtle.exportKey("spki",k.publicKey),"PUBLIC");
+    document.getElementById("out").style.display="block";
+    msg.textContent="Chiavi create.";
+  }catch(e){
+    msg.style.color="#fca5a5";
+    msg.textContent="Il browser non supporta queste chiavi: aggiorna iOS (serve iOS 17 o successivo) e riprova da Safari.";
+  }
+};
+document.querySelectorAll("[data-copy]").forEach(b=>b.onclick=async()=>{
+  const t=document.getElementById(b.dataset.copy); t.select();
+  try{await navigator.clipboard.writeText(t.value);}catch(e){document.execCommand("copy");}
+  const old=b.textContent; b.textContent="Copiata ✓"; setTimeout(()=>b.textContent=old,1500);
+});
+</script>
+</body>
+</html>

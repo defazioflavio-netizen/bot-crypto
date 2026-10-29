@@ -1,0 +1,51 @@
+name: Bot crypto
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      solo_test:
+        description: "Solo test connessione (nessun ordine)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bot-crypto
+  cancel-in-progress: false
+
+jobs:
+  giro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installa librerie
+        run: pip install requests cryptography
+
+      - name: Esegui il bot
+        env:
+          REVX_API_KEY: ${{ secrets.REVX_API_KEY }}
+          REVX_PRIVATE_KEY: ${{ secrets.REVX_PRIVATE_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SOLO_TEST: ${{ inputs.solo_test }}
+        run: python bot.py
+
+      - name: Salva i dati
+        if: always()
+        run: |
+          git config user.name "bot-crypto"
+          git config user.email "bot-crypto@users.noreply.github.com"
+          if [ -f data.json ]; then
+            git add data.json
+            git diff --cached --quiet || (git commit -m "Aggiornamento dati" && git pull --rebase && git push)
+          fi
