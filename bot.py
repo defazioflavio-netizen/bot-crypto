@@ -835,7 +835,9 @@ def main():
     valore = valore_bot(dati, prezzi, valuta)
     prezzo_btc = float(prezzi[f"BTC-{valuta}"]["mid"])
     bench = dati["capitale_iniziale"] * prezzo_btc / dati["prezzo_btc_iniziale"]
-    dati["equity"].append([ora_ms(), round(float(valore), 2), round(bench, 2)])
+    # un punto sulla curva ogni 5 minuti circa (il bot gira più spesso, ma basta così)
+    if not dati["equity"] or ora_ms() - dati["equity"][-1][0] >= 4 * 60_000:
+        dati["equity"].append([ora_ms(), round(float(valore), 2), round(bench, 2)])
     if len(dati["equity"]) > MAX_PUNTI:
         meta = len(dati["equity"]) // 2
         dati["equity"] = dati["equity"][:meta:2] + dati["equity"][meta:]
@@ -852,9 +854,11 @@ def main():
     salva_dati(dati)
 
 
-if __name__ == "__main__":
+def esegui_un_giro():
+    """Un controllo completo. Ritorna False se c'è stato un errore."""
     try:
         main()
+        return True
     except Exception as e:
         print("ERRORE:", e)
         avvisa = True
@@ -871,4 +875,18 @@ if __name__ == "__main__":
             pass
         if avvisa:
             tg_invia(f"⚠️ Errore del bot: {str(e)[:300]}")
-        sys.exit(1)
+        return False
+
+
+if __name__ == "__main__":
+    # GitHub avvia il bot ogni 5 minuti; dentro ogni avvio il bot ripete il controllo
+    # ogni CONTROLLO_SECONDI per circa DURATA_GIRO secondi, così risponde ai comandi in meno di un minuto
+    durata = int(os.environ.get("DURATA_GIRO", "0") or 0)
+    pausa = int(os.environ.get("CONTROLLO_SECONDI", "45") or 45)
+    fine = time.time() + durata
+    while True:
+        if not esegui_un_giro():
+            sys.exit(1)
+        if SOLO_TEST or time.time() + pausa > fine:
+            break
+        time.sleep(pausa)

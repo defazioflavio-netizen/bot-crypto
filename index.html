@@ -124,7 +124,10 @@ function sorgenti(){
   const h=location.hostname;
   if(h.endsWith("github.io")){
     const owner=h.split(".")[0], repo=location.pathname.split("/").filter(Boolean)[0];
-    if(repo) list.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data.json?t=${Date.now()}`);
+    if(repo){
+      list.push(`https://raw.githubusercontent.com/${owner}/${repo}/dati/data.json?t=${Date.now()}`);
+      list.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data.json?t=${Date.now()}`);
+    }
   }
   list.push(`data.json?t=${Date.now()}`);
   return list;
