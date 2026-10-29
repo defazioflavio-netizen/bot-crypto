@@ -22,7 +22,9 @@ from decimal import Decimal, ROUND_DOWN
 from zoneinfo import ZoneInfo
 
 import requests
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 # ---------------------------------------------------------------------------
 # IMPOSTAZIONI DELLA STRATEGIA (puoi modificarle da GitHub)
@@ -69,6 +71,8 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 SOLO_TEST = os.environ.get("SOLO_TEST", "").strip().lower() in ("1", "true", "yes")
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
+PASSWORD_DATI = os.environ.get("DASHBOARD_PASSWORD", "")
+ITERAZIONI = 200_000
 
 
 def ora_ms():
@@ -439,17 +443,40 @@ def arrotonda_giu(valore, passo):
 # ---------------------------------------------------------------------------
 # DATI
 # ---------------------------------------------------------------------------
+def _chiave(salt):
+    """Chiave AES-256 ricavata dalla password (stesso metodo usato dalla dashboard e dal widget)."""
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=ITERAZIONI)
+    return kdf.derive(PASSWORD_DATI.encode())
+
+
 def carica_dati():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, encoding="utf-8") as f:
+        contenuto = json.load(f)
+    if not contenuto.get("cifrato"):
+        return contenuto  # vecchio formato non cifrato
+    if not PASSWORD_DATI:
+        raise RuntimeError("I dati sono cifrati ma manca il Secret DASHBOARD_PASSWORD.")
+    salt = base64.b64decode(contenuto["salt"])
+    iv = base64.b64decode(contenuto["iv"])
+    chiaro = AESGCM(_chiave(salt)).decrypt(iv, base64.b64decode(contenuto["dati"]), None)
+    return json.loads(chiaro)
 
 
 def salva_dati(d):
     d["aggiornato"] = ora_iso()
+    if not PASSWORD_DATI:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        return
+    # dati cifrati: senza la password chi apre il file vede solo caratteri a caso
+    salt, iv = os.urandom(16), os.urandom(12)
+    testo = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode()
+    cifrato = AESGCM(_chiave(salt)).encrypt(iv, testo, None)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=1)
+        json.dump({"cifrato": 1, "iterazioni": ITERAZIONI, "salt": base64.b64encode(salt).decode(),
+                   "iv": base64.b64encode(iv).decode(), "dati": base64.b64encode(cifrato).decode()}, f)
 
 
 def default_dati():

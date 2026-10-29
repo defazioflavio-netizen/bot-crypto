@@ -56,10 +56,25 @@
   .empty{color:var(--muted);text-align:center;padding:16px 0;font-size:14px}
   .foot{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
   .err{background:rgba(239,68,68,.12);color:#fca5a5;border-radius:12px;padding:10px 12px;font-size:12px;margin-bottom:12px;display:none;word-break:break-word}
+  .blocco{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;padding:24px;z-index:10}
+  .blocco .box{width:100%;max-width:360px;text-align:center}
+  .blocco h2{font-size:20px;margin:0 0 6px}
+  .blocco p{color:var(--muted);font-size:14px;margin:0 0 18px}
+  .blocco input{width:100%;font-size:17px;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);margin-bottom:10px}
+  .blocco button{width:100%;font-size:16px;font-weight:650;padding:13px;border:0;border-radius:12px;background:var(--accent);color:#fff}
+  .blocco .errore{color:var(--down);font-size:13px;min-height:18px;margin-top:10px}
+  .link{background:none;border:0;color:var(--muted);font-size:12px;text-decoration:underline;margin-top:6px}
   .more{width:100%;background:var(--line);color:var(--text);border:0;border-radius:10px;padding:9px;margin-top:8px;font-weight:600}
 </style>
 </head>
 <body>
+<div class="blocco" id="blocco"><div class="box">
+  <h2>🔒 Dashboard protetta</h2>
+  <p>Inserisci la password che hai salvato nel Secret DASHBOARD_PASSWORD.</p>
+  <form id="formBlocco"><input id="pwd" type="password" autocomplete="current-password" placeholder="Password">
+  <button type="submit">Sblocca</button></form>
+  <div class="errore" id="erroreBlocco"></div>
+</div></div>
 <div class="wrap">
   <header>
     <h1>Bot Crypto</h1>
@@ -115,6 +130,7 @@
   </div>
 
   <div class="foot" id="agg">–</div>
+  <div class="foot"><button class="link" id="esci">Blocca la dashboard su questo telefono</button></div>
 </div>
 
 <script>
@@ -129,6 +145,7 @@ function sorgenti(){
   if(h.endsWith("github.io")){
     const owner=h.split(".")[0], repo=location.pathname.split("/").filter(Boolean)[0];
     if(repo){
+      list.push(`https://raw.githubusercontent.com/${owner}/${repo}/archivio/data.json?t=${Date.now()}`);
       list.push(`https://raw.githubusercontent.com/${owner}/${repo}/dati/data.json?t=${Date.now()}`);
       list.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data.json?t=${Date.now()}`);
     }
@@ -137,9 +154,46 @@ function sorgenti(){
   return list;
 }
 
+// ---- protezione con password: i dati sono cifrati, si decifrano solo qui sul telefono ----
+const CHIAVE_PWD="botcrypto_pw";
+let pwdMemoria=null;
+const leggiPwd=()=>{ try{ return localStorage.getItem(CHIAVE_PWD)||pwdMemoria; }catch(e){ return pwdMemoria; } };
+const salvaPwd=p=>{ pwdMemoria=p; try{ p?localStorage.setItem(CHIAVE_PWD,p):localStorage.removeItem(CHIAVE_PWD); }catch(e){} };
+const b64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function decifra(c,pwd){
+  const base=await crypto.subtle.importKey("raw",new TextEncoder().encode(pwd),"PBKDF2",false,["deriveKey"]);
+  const key=await crypto.subtle.deriveKey({name:"PBKDF2",salt:b64(c.salt),iterations:c.iterazioni||200000,hash:"SHA-256"},
+    base,{name:"AES-GCM",length:256},false,["decrypt"]);
+  const chiaro=await crypto.subtle.decrypt({name:"AES-GCM",iv:b64(c.iv)},key,b64(c.dati));
+  return JSON.parse(new TextDecoder().decode(chiaro));
+}
+function mostraBlocco(msg){
+  document.getElementById("blocco").style.display="flex";
+  document.getElementById("erroreBlocco").textContent=msg||"";
+}
+document.getElementById("formBlocco").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const p=document.getElementById("pwd").value; if(!p) return;
+  salvaPwd(p); document.getElementById("erroreBlocco").textContent="Controllo…";
+  await carica();
+});
+document.getElementById("esci").onclick=()=>{ salvaPwd(null); location.reload(); };
+let ultimoGrezzo=null;
+
 async function carica(){
   for(const url of sorgenti()){
-    try{ const r=await fetch(url,{cache:"no-store"}); if(r.ok){ dati=await r.json(); render(); return; } }catch(e){}
+    try{
+      const r=await fetch(url,{cache:"no-store"}); if(!r.ok) continue;
+      const grezzo=await r.json(); ultimoGrezzo=grezzo;
+      if(grezzo.cifrato){
+        const p=leggiPwd();
+        if(!p){ mostraBlocco(); return; }
+        try{ dati=await decifra(grezzo,p); }
+        catch(e){ salvaPwd(null); mostraBlocco("Password sbagliata, riprova."); return; }
+        document.getElementById("blocco").style.display="none";
+      } else dati=grezzo;
+      render(); return;
+    }catch(e){}
   }
   document.getElementById("agg").textContent="Dati non ancora disponibili: il bot non ha ancora fatto il primo giro.";
 }
