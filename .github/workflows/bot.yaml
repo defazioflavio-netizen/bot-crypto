@@ -2,7 +2,7 @@ name: Bot crypto
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"    # ogni 5 minuti (il minimo che GitHub permette)
   workflow_dispatch:
     inputs:
       solo_test:
@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -31,6 +33,13 @@ jobs:
       - name: Installa librerie
         run: pip install requests cryptography
 
+      - name: Recupera i dati
+        # i dati stanno nel ramo "dati", così la dashboard non viene ripubblicata a ogni giro
+        run: |
+          if git show origin/dati:data.json > /tmp/data.json 2>/dev/null; then
+            mv /tmp/data.json data.json
+          fi
+
       - name: Esegui il bot
         env:
           REVX_API_KEY: ${{ secrets.REVX_API_KEY }}
@@ -38,14 +47,24 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SOLO_TEST: ${{ inputs.solo_test }}
+          DURATA_GIRO: "240"         # resta attivo circa 4 minuti per avvio
+          CONTROLLO_SECONDI: "45"    # controlla mercato e comandi ogni 45 secondi
         run: python bot.py
 
       - name: Salva i dati
         if: always()
         run: |
+          [ -f data.json ] || exit 0
+          cp data.json /tmp/data.json
           git config user.name "bot-crypto"
           git config user.email "bot-crypto@users.noreply.github.com"
-          if [ -f data.json ]; then
-            git add data.json
-            git diff --cached --quiet || (git commit -m "Aggiornamento dati" && git pull --rebase && git push)
+          if git rev-parse --verify origin/dati >/dev/null 2>&1; then
+            git checkout -f -B dati origin/dati
+          else
+            git checkout -f --orphan dati
+            git rm -rf --cached . >/dev/null 2>&1 || true
           fi
+          cp /tmp/data.json data.json
+          git add data.json
+          git diff --cached --quiet || git commit -m "Aggiornamento dati"
+          git push origin dati
