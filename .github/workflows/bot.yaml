@@ -34,11 +34,14 @@ jobs:
         run: pip install requests cryptography
 
       - name: Recupera i dati
-        # i dati stanno nel ramo "dati", così la dashboard non viene ripubblicata a ogni giro
+        # i dati (cifrati) stanno nel ramo "archivio"; "dati" è il vecchio ramo, usato solo per il passaggio
         run: |
-          if git show origin/dati:data.json > /tmp/data.json 2>/dev/null; then
-            mv /tmp/data.json data.json
-          fi
+          for ramo in archivio dati; do
+            if git show origin/$ramo:data.json > /tmp/data.json 2>/dev/null; then
+              mv /tmp/data.json data.json
+              break
+            fi
+          done
 
       - name: Esegui il bot
         env:
@@ -46,6 +49,7 @@ jobs:
           REVX_PRIVATE_KEY: ${{ secrets.REVX_PRIVATE_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
           SOLO_TEST: ${{ inputs.solo_test }}
           DURATA_GIRO: "240"         # resta attivo circa 4 minuti per avvio
           CONTROLLO_SECONDI: "45"    # controlla mercato e comandi ogni 45 secondi
@@ -58,13 +62,13 @@ jobs:
           cp data.json /tmp/data.json
           git config user.name "bot-crypto"
           git config user.email "bot-crypto@users.noreply.github.com"
-          if git rev-parse --verify origin/dati >/dev/null 2>&1; then
-            git checkout -f -B dati origin/dati
+          if git rev-parse --verify origin/archivio >/dev/null 2>&1; then
+            git checkout -f -B archivio origin/archivio
           else
-            git checkout -f --orphan dati
+            git checkout -f --orphan archivio
             git rm -rf --cached . >/dev/null 2>&1 || true
           fi
           cp /tmp/data.json data.json
           git add data.json
           git diff --cached --quiet || git commit -m "Aggiornamento dati"
-          git push origin dati
+          git push origin archivio
