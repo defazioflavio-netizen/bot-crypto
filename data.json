@@ -1,17 +1,23 @@
 {
  "versione": 1,
  "valuta": "EUR",
- "inizio": null,
- "capitale_iniziale": null,
- "prezzo_btc_iniziale": null,
+ "inizio": 1793299618040,
+ "capitale_iniziale": 100.0,
+ "prezzo_btc_iniziale": 72183.11,
  "stato": "attivo",
- "base_emergenza": null,
+ "base_emergenza": 100.0,
  "posizioni": {},
  "ultima_vendita": {},
  "operazioni": [],
- "equity": [],
+ "equity": [
+  [
+   1793299634632,
+   100.0,
+   100.01
+  ]
+ ],
  "segnali": {},
- "capitale_bot": null,
+ "capitale_bot": 100.0,
  "strategia": {
   "intervallo_candele": 60,
   "ema_veloce": 20,
@@ -20,12 +26,46 @@
   "stop_loss": 0.05,
   "trailing_stop": 0.03,
   "attiva_trailing_dopo": 0.03,
-  "asset": [
-   "BTC",
-   "ETH"
-  ],
-  "aggiornata": null,
-  "origine": "impostazioni iniziali"
+  "asset": [],
+  "aggiornata": 1793299634083,
+  "origine": "confermata",
+  "rendimento_verifica": null,
+  "giorni_verifica": 20,
+  "classifica": {
+   "BTC": {
+    "verifica_%": -8.71,
+    "allenamento_%": 6.92
+   },
+   "ETH": {
+    "verifica_%": -8.15,
+    "allenamento_%": -6.44
+   },
+   "SOL": {
+    "verifica_%": -9.41,
+    "allenamento_%": 7.28
+   },
+   "XRP": {
+    "verifica_%": -3.12,
+    "allenamento_%": -0.45
+   },
+   "ADA": {
+    "verifica_%": -13.34,
+    "allenamento_%": 11.55
+   },
+   "DOGE": {
+    "verifica_%": -6.22,
+    "allenamento_%": 10.97
+   },
+   "LINK": {
+    "verifica_%": -10.75,
+    "allenamento_%": 12.98
+   },
+   "AVAX": {
+    "verifica_%": -16.12,
+    "allenamento_%": -8.74
+   }
+  },
+  "varianti_provate": 108
  },
  "tg_offset": 0,
  "ultimo_report": null,
@@ -65,5 +105,23 @@
   "ora_report": 21
  },
  "errori": [],
- "aggiornato": "2026-10-29T18:43:55+00:00"
+ "aggiornato": "2026-10-29T18:47:14+00:00",
+ "storia_strategie": [
+  {
+   "t": 1793299634083,
+   "asset": [],
+   "parametri": [
+    60,
+    20,
+    50,
+    70,
+    0.05,
+    0.03,
+    0.03
+   ],
+   "rendimento_verifica": null
+  }
+ ],
+ "valore_attuale": 100.0,
+ "liquidita": 100.0
 }
