@@ -14,6 +14,11 @@
    1793299634632,
    100.0,
    100.01
+  ],
+  [
+   1793300254717,
+   100.0,
+   100.27
   ]
  ],
  "segnali": {},
@@ -27,10 +32,11 @@
   "trailing_stop": 0.03,
   "attiva_trailing_dopo": 0.03,
   "asset": [],
-  "aggiornata": 1793299634083,
+  "aggiornata": 1793300253816,
   "origine": "confermata",
   "rendimento_verifica": null,
   "giorni_verifica": 20,
+  "operazioni_al_giorno": 0,
   "classifica": {
    "BTC": {
     "verifica_%": -8.71,
@@ -65,9 +71,9 @@
     "allenamento_%": -8.74
    }
   },
-  "varianti_provate": 108
+  "varianti_provate": 124
  },
- "tg_offset": 0,
+ "tg_offset": 189371621,
  "ultimo_report": null,
  "config": {
   "valuta": "EUR",
@@ -96,19 +102,35 @@
    "AVAX"
   ],
   "max_asset_attivi": 3,
-  "ottimizza_ogni_ore": 24,
+  "ottimizza_ogni_ore": 4,
   "giorni_storico": 60,
+  "giorni_storico_15m": 20,
   "costo_per_operazione": 0.0015,
   "peso_rischio": 0.3,
   "pausa_dopo_vendita_ore": 6,
+  "pausa_dopo_vendita_ore_15m": 1,
   "soglia_emergenza": 0.7,
   "ora_report": 21
  },
  "errori": [],
- "aggiornato": "2026-10-29T18:47:14+00:00",
+ "aggiornato": "2026-10-29T18:57:34+00:00",
  "storia_strategie": [
   {
    "t": 1793299634083,
+   "asset": [],
+   "parametri": [
+    60,
+    20,
+    50,
+    70,
+    0.05,
+    0.03,
+    0.03
+   ],
+   "rendimento_verifica": null
+  },
+  {
+   "t": 1793300253816,
    "asset": [],
    "parametri": [
     60,
