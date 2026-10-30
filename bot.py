@@ -152,8 +152,26 @@ class RevX:
         return self._call("GET", "/configuration/pairs")
 
     def ticker(self, simboli):
-        res = self._call("GET", "/tickers", query="symbols=" + ",".join(simboli))
-        return {t["symbol"].replace("/", "-"): t for t in res["data"]}
+        """Prezzi attuali. A volte Revolut X manda un prezzo vuoto: quella crypto viene scartata
+        (e si riprova un paio di volte), così un dato mancante non blocca tutto il giro."""
+        for tentativo in range(3):
+            res = self._call("GET", "/tickers", query="symbols=" + ",".join(simboli))
+            prezzi = {}
+            for t in res["data"]:
+                try:
+                    bid, ask = float(t.get("bid") or 0), float(t.get("ask") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if bid <= 0 or ask <= 0:
+                    continue
+                try:
+                    float(t.get("mid") or "")
+                except (TypeError, ValueError):
+                    t["mid"] = str((bid + ask) / 2)
+                prezzi[t["symbol"].replace("/", "-")] = t
+            if all(s in prezzi for s in simboli) or tentativo == 2:
+                return prezzi
+            time.sleep(2)
 
     def candele(self, simbolo, intervallo, quante=99):
         adesso = ora_ms()
