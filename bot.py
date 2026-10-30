@@ -53,7 +53,8 @@ CONFIG = {
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
     "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
     "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
-    "peso_rischio": 0.3,             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
+    "peso_rischio": 0.3,
+    "crollo_max_7g": 0.25,           # strategia "rimbalzo": non compra se la crypto è scesa più del 25% in 7 giorni             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
     "pausa_dopo_vendita_ore": 6,     # dopo una vendita aspetta prima di ricomprare la stessa crypto
     "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
@@ -264,24 +265,53 @@ def serie_rsi(v, p=14):
     return out
 
 
+def tipo(P):
+    return P.get("tipo", "trend")
+
+
+def esce(P, p, entrata, picco, ef_i, el_i, rs_i):
+    """Motivo di vendita (o None). Stesse regole per simulazione e trading reale."""
+    if p <= entrata * (1 - P["stop_loss"]):
+        return f"stop loss (-{P['stop_loss']*100:.1f}%)".replace(".0%", "%")
+    if tipo(P) == "rimbalzo":
+        if p >= entrata * (1 + P["take_profit"]):
+            return f"rimbalzo incassato (+{P['take_profit']*100:.0f}%)"
+        if rs_i > P["rsi_uscita"]:
+            return f"rimbalzo finito (RSI sopra {P['rsi_uscita']})"
+        return None
+    if picco >= entrata * (1 + P["attiva_trailing_dopo"]) and p <= picco * (1 - P["trailing_stop"]):
+        return "trailing stop: protegge il guadagno"
+    if ef_i < el_i:
+        return "trend girato al ribasso"
+    return None
+
+
+def entra(P, p, ef_i, el_i, rs_i, prezzo_7g_fa):
+    """True se le regole dicono di comprare."""
+    if tipo(P) == "rimbalzo":
+        crollo = prezzo_7g_fa is not None and p < prezzo_7g_fa * (1 - CONFIG["crollo_max_7g"])
+        return rs_i < P["rsi_ingresso"] and p < el_i and not crollo
+    return ef_i > el_i and p > el_i and rs_i < P["rsi_max_ingresso"]
+
+
 def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
     """Simula la strategia sulle candele [da, a). Ritorna (rendimento, calo massimo, n. operazioni)."""
     cap, pos, entrata, picco = 1.0, False, 0.0, 0.0
     ultima_uscita, max_eq, max_calo, n = -10**9, 1.0, 0.0, 0
+    barre_7g = 7 * 1440 // P["intervallo_candele"]
     for i in range(max(da, 1), a):
         if ef[i] is None or el[i] is None or rs[i] is None:
             continue
         p = c[i]
         if pos:
             picco = max(picco, p)
-            if (p <= entrata * (1 - P["stop_loss"])
-                    or (picco >= entrata * (1 + P["attiva_trailing_dopo"]) and p <= picco * (1 - P["trailing_stop"]))
-                    or ef[i] < el[i]):
+            if esce(P, p, entrata, picco, ef[i], el[i], rs[i]):
                 cap *= p / entrata * (1 - costo)
                 pos, ultima_uscita, n = False, i, n + 1
             eq = cap * p / entrata if pos else cap
         else:
-            if ef[i] > el[i] and p > el[i] and rs[i] < P["rsi_max_ingresso"] and i - ultima_uscita >= pausa_barre:
+            fa7 = c[i - barre_7g] if i >= barre_7g else None
+            if i - ultima_uscita >= pausa_barre and entra(P, p, ef[i], el[i], rs[i], fa7):
                 cap *= 1 - costo
                 pos, entrata, picco = True, p, p
             eq = cap
@@ -294,6 +324,19 @@ def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
 
 
 def griglia():
+    yield from griglia_trend()
+    # strategie "rimbalzo": comprano quando una crypto è scesa troppo e rivendono alla risalita
+    for intervallo in (15, 60, 240):
+        for ri in (25, 30):
+            for ru in (55, 65):
+                for sl in (0.04, 0.08):
+                    for tp in (0.03, 0.06):
+                        yield {"tipo": "rimbalzo", "intervallo_candele": intervallo, "ema_veloce": 20, "ema_lenta": 50,
+                               "rsi_ingresso": ri, "rsi_uscita": ru, "stop_loss": sl, "take_profit": tp,
+                               "rsi_max_ingresso": 70, "trailing_stop": 0.03, "attiva_trailing_dopo": 0.03}
+
+
+def griglia_trend():
     # strategie veloci su candele da 15 minuti: più operazioni al giorno, stop più stretti
     for ev, el in ((5, 13), (9, 21)):
         for rmax in (65, 75):
@@ -318,8 +361,7 @@ def pausa_ore(intervallo):
 
 
 def chiave(P):
-    return tuple(P[k] for k in ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
-                                "stop_loss", "trailing_stop", "attiva_trailing_dopo"))
+    return tuple(P.get(k) if k != "tipo" else tipo(P) for k in chiave_nomi())
 
 
 def strategia_iniziale():
@@ -397,10 +439,12 @@ def ottimizza(api, dati, coppie):
         tr, ve, scelte, ris, P = migliore
         origine = "ottimizzazione"
     else:
-        tr, ve, scelte, ris, P = tr_a, ve_a, scelte_a, ris_a, {k: attuale[k] for k in chiave_nomi()}
+        tr, ve, scelte, ris, P = tr_a, ve_a, scelte_a, ris_a, {k: attuale.get(k) for k in chiave_nomi() if attuale.get(k) is not None}
+        P["tipo"] = tipo(attuale)
         origine = attuale.get("origine", "impostazioni iniziali") if attuale.get("aggiornata") else "confermata"
 
     nuova = dict(P)
+    nuova["tipo"] = tipo(P)
     nuova.update({
         "asset": scelte, "aggiornata": ora_ms(), "origine": origine,
         "rendimento_verifica": round(sum(ris[a]["rend_verifica"] for a in scelte) / len(scelte) * 100, 2) if scelte else None,
@@ -419,16 +463,24 @@ def ottimizza(api, dati, coppie):
 
 
 def chiave_nomi():
-    return ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
-            "stop_loss", "trailing_stop", "attiva_trailing_dopo")
+    return ("tipo", "intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
+            "stop_loss", "trailing_stop", "attiva_trailing_dopo", "rsi_ingresso", "rsi_uscita", "take_profit")
 
 
 def descrivi_strategia(P):
     ore = {15: "15 minuti", 60: "1 ora", 240: "4 ore"}.get(P["intervallo_candele"], f"{P['intervallo_candele']} min")
     crypto = ", ".join(P["asset"]) if P["asset"] else "nessuna (mercato sfavorevole: resta in liquidità)"
-    righe = [f"<b>Crypto:</b> {crypto}",
-             f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
-             f"<b>Stop loss:</b> -{P['stop_loss']*100:.0f}% · <b>trailing:</b> -{P['trailing_stop']*100:.0f}% dopo +{P['attiva_trailing_dopo']*100:.0f}%"]
+    if tipo(P) == "rimbalzo":
+        righe = [f"<b>Tipo:</b> rimbalzo (compra dopo i cali, rivende alla risalita)",
+                 f"<b>Crypto:</b> {crypto}",
+                 f"<b>Candele:</b> {ore} · compra con RSI sotto {P['rsi_ingresso']}, rivende sopra {P['rsi_uscita']}",
+                 f"<b>Obiettivo:</b> +{P['take_profit']*100:.0f}% · <b>stop loss:</b> -{P['stop_loss']*100:.0f}% · "
+                 f"mai se è scesa più del {CONFIG['crollo_max_7g']*100:.0f}% in 7 giorni"]
+    else:
+        righe = [f"<b>Tipo:</b> segue la tendenza (compra quando il prezzo risale)",
+                 f"<b>Crypto:</b> {crypto}",
+                 f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
+                 f"<b>Stop loss:</b> -{P['stop_loss']*100:.1f}% · <b>trailing:</b> -{P['trailing_stop']*100:.1f}% dopo +{P['attiva_trailing_dopo']*100:.1f}%".replace(".0%", "%")]
     if P.get("rendimento_verifica") is not None:
         righe.append(f"<b>Test sugli ultimi {P.get('giorni_verifica', 20)} giorni:</b> {P['rendimento_verifica']:+.2f}% (simulazione al netto dei costi, non è una promessa)")
         righe.append(f"<b>Operazioni previste:</b> circa {P.get('operazioni_al_giorno', 0)} al giorno per crypto")
@@ -825,26 +877,28 @@ def main():
             r = rsi(ch, CONFIG["rsi_periodo"])
             bid, ask = float(prezzi[sim]["bid"]), float(prezzi[sim]["ask"])
             trend_su = ef > el and ch[-1] > el
+            fa7 = None
+            if tipo(P) == "rimbalzo":
+                try:
+                    orarie = api.storico(sim, 7 * 24 + 2)
+                    if len(orarie) >= 7 * 24:
+                        fa7 = float(orarie[-7 * 24]["close"])
+                except Exception:
+                    pass
             dati["segnali"][a] = {"prezzo": bid, "ema_veloce": round(ef, 2), "ema_lenta": round(el, 2),
                                   "rsi": round(r, 1), "trend": "rialzo" if trend_su else "ribasso", "t": ora_ms()}
+            if fa7:
+                dati["segnali"][a]["variazione_7g"] = round((bid / fa7 - 1) * 100, 1)
 
             pos = dati["posizioni"].get(a)
             if pos:
                 pos["picco"] = max(pos["picco"], bid)
-                ingresso = pos["prezzo_ingresso"]
-                motivo = None
-                if bid <= ingresso * (1 - P["stop_loss"]):
-                    motivo = f"stop loss (-{P['stop_loss']*100:.0f}%)"
-                elif pos["picco"] >= ingresso * (1 + P["attiva_trailing_dopo"]) and \
-                        bid <= pos["picco"] * (1 - P["trailing_stop"]):
-                    motivo = "trailing stop: protegge il guadagno"
-                elif ef < el:
-                    motivo = "trend girato al ribasso"
+                motivo = esce(P, bid, pos["prezzo_ingresso"], pos["picco"], ef, el, r)
                 if motivo:
                     qty = qty_vendibile(dati, saldi, a)
                     vendi(api, dati, a, qty, bid, coppie, motivo)
                     saldi = api.saldi()
-            elif a in P["asset"] and dati["stato"] == "attivo" and trend_su and r < P["rsi_max_ingresso"]:
+            elif a in P["asset"] and dati["stato"] == "attivo" and entra(P, ch[-1], ef, el, r, fa7):
                 pausa = pausa_ore(P["intervallo_candele"]) * 3_600_000
                 if ora_ms() - dati["ultima_vendita"].get(a, 0) < pausa:
                     continue
@@ -853,8 +907,10 @@ def main():
                 quota = 1 / max(1, len(P["asset"]))
                 importo = min(disponibile, dati["capitale_bot"] * quota) * 0.995
                 if importo >= CONFIG["ordine_minimo"]:
-                    compra(api, dati, a, importo, ask, coppie,
-                           f"trend in rialzo (EMA{P['ema_veloce']} sopra EMA{P['ema_lenta']}), RSI {r:.0f}")
+                    motivo = (f"rimbalzo: crypto scesa troppo (RSI {r:.0f} sotto {P['rsi_ingresso']})"
+                              if tipo(P) == "rimbalzo" else
+                              f"trend in rialzo (EMA{P['ema_veloce']} sopra EMA{P['ema_lenta']}), RSI {r:.0f}")
+                    compra(api, dati, a, importo, ask, coppie, motivo)
                     saldi = api.saldi()
 
     # valore finale e curva

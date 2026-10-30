@@ -247,8 +247,11 @@ function render(){
     const cl=P.classifica||{}, nomi=Object.keys(cl).sort((a,b)=>cl[b]["verifica_%"]-cl[a]["verifica_%"]);
     stEl.innerHTML=`
       <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra ${Object.keys(cl).length||"–"} analizzate</div></div><div class="r"><div class="t">${crypto}</div></div></div>
-      <div class="row"><div><div class="t">Regole</div><div class="s">candele ${ore} · EMA ${P.ema_veloce}/${P.ema_lenta} · RSI max ${P.rsi_max_ingresso}</div></div>
-        <div class="r"><div class="s">stop -${Math.round(P.stop_loss*100)}%<br>trailing -${Math.round(P.trailing_stop*100)}% dopo +${Math.round(P.attiva_trailing_dopo*100)}%</div></div></div>
+      ${P.tipo==="rimbalzo"
+        ? `<div class="row"><div><div class="t">Tipo: rimbalzo</div><div class="s">candele ${ore} · compra con RSI sotto ${P.rsi_ingresso}, rivende sopra ${P.rsi_uscita}</div></div>
+            <div class="r"><div class="s">obiettivo +${Math.round(P.take_profit*100)}%<br>stop -${Math.round(P.stop_loss*100)}%</div></div></div>`
+        : `<div class="row"><div><div class="t">Tipo: segue la tendenza</div><div class="s">candele ${ore} · EMA ${P.ema_veloce}/${P.ema_lenta} · RSI max ${P.rsi_max_ingresso}</div></div>
+            <div class="r"><div class="s">stop -${+(P.stop_loss*100).toFixed(1)}%<br>trailing -${+(P.trailing_stop*100).toFixed(1)}% dopo +${+(P.attiva_trailing_dopo*100).toFixed(1)}%</div></div></div>`}
       <div class="row"><div><div class="t">Simulazione ultimi ${P.giorni_verifica||20} giorni</div><div class="s">${P.varianti_provate||"–"} varianti · ~${P.operazioni_al_giorno??0} operazioni/giorno · ${P.aggiornata?dt(P.aggiornata):"non ancora ottimizzata"}</div></div>
         <div class="r"><div class="t ${(P.rendimento_verifica||0)>=0?"up":"down"}">${P.rendimento_verifica==null?"–":pct(P.rendimento_verifica)}</div></div></div>
       ${nomi.map(a=>`<div class="row"><div><div class="t">${a}${(P.asset||[]).includes(a)?" ✓":""}</div><div class="s">allenamento ${pct(cl[a]["allenamento_%"])}</div></div>
