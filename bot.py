@@ -51,7 +51,8 @@ CONFIG = {
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
     "ottimizza_ogni_ore": 4,         # ogni 4 ore rifà l'analisi del mercato
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
-    "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
+    "giorni_storico_15m": 20,
+    "strategie_veloci": False,       # candele da 15 minuti: attivale (True) solo se il bot gira davvero ogni pochi minuti        # storico per le strategie veloci su candele da 15 minuti
     "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
     "peso_rischio": 0.3,
     "crollo_max_7g": 0.25,           # strategia "rimbalzo": non compra se la crypto è scesa più del 25% in 7 giorni             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
@@ -323,10 +324,14 @@ def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
     return cap - 1, max_calo, n
 
 
+def intervalli():
+    return (15, 60, 240) if CONFIG["strategie_veloci"] else (60, 240)
+
+
 def griglia():
-    yield from griglia_trend()
+    yield from (P for P in griglia_trend() if P["intervallo_candele"] in intervalli())
     # strategie "rimbalzo": comprano quando una crypto è scesa troppo e rivendono alla risalita
-    for intervallo in (15, 60, 240):
+    for intervallo in intervalli():
         for ri in (25, 30):
             for ru in (55, 65):
                 for sl in (0.04, 0.08):
@@ -381,8 +386,8 @@ def ottimizza(api, dati, coppie):
     for a in candidati:
         try:
             st = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico"] * 24)
-            st15 = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico_15m"] * 24, 15)
-            if len(st) >= 24 * 20 and len(st15) >= 96 * 7:
+            st15 = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico_15m"] * 24, 15) if 15 in intervalli() else []
+            if len(st) >= 24 * 20 and (15 not in intervalli() or len(st15) >= 96 * 7):
                 storici[a], storici15[a] = st, st15
         except Exception as e:
             print("storico", a, e)
@@ -392,7 +397,7 @@ def ottimizza(api, dati, coppie):
     # indicatori calcolati una volta per crypto e risoluzione
     prep = {}
     for a in storici:
-        for intervallo in (15, 60, 240):
+        for intervallo in intervalli():
             c = [float(x["close"]) for x in storici15[a]] if intervallo == 15 else chiusure(storici[a], intervallo)
             prep[(a, intervallo)] = {"c": c, "rsi": serie_rsi(c, CONFIG["rsi_periodo"]),
                                      "ema": {p: serie_ema(c, p) for p in (5, 9, 12, 13, 20, 21, 26, 50)}}
@@ -432,6 +437,9 @@ def ottimizza(api, dati, coppie):
             migliore = (tr, ve, scelte, ris, P)
 
     attuale = dati.get("strategia") or strategia_iniziale()
+    if attuale.get("intervallo_candele") not in intervalli():
+        # strategia attuale non più ammessa (es. veloci disattivate): va sostituita
+        attuale = strategia_iniziale()
     tr_a, ve_a, scelte_a, ris_a = valuta_P(attuale)
 
     # cambia strategia solo se quella nuova è davvero migliore (margine minimo per non cambiare a caso)
@@ -804,6 +812,7 @@ def main():
 
     # apprendimento: ricalcola la strategia una volta al giorno (o su comando /ottimizza)
     scaduta = (not dati["strategia"].get("aggiornata") or
+               dati["strategia"].get("intervallo_candele") not in intervalli() or
                ora_ms() - dati["strategia"]["aggiornata"] > CONFIG["ottimizza_ogni_ore"] * 3_600_000)
     if scaduta or "/ottimizza" in comandi:
         try:
