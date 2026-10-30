@@ -28,6 +28,11 @@
   .badge.attivo{background:rgba(34,197,94,.15);color:var(--up)}
   .badge.pausa{background:rgba(245,185,66,.15);color:var(--bench)}
   .badge.fermato{background:rgba(239,68,68,.15);color:var(--down)}
+  .destra{display:flex;align-items:center;gap:10px}
+  .led{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--muted)}
+  .led i{width:9px;height:9px;border-radius:50%;background:#3a4252}
+  .led.on i{background:var(--up);box-shadow:0 0 7px var(--up)}
+  .led.off i{background:var(--down);box-shadow:0 0 5px rgba(239,68,68,.55)}
   .hero{background:var(--card);border-radius:18px;padding:18px;margin-bottom:12px}
   .hero .lbl{color:var(--muted);font-size:13px}
   .hero .val{font-size:38px;font-weight:700;letter-spacing:-1px;margin:2px 0}
@@ -78,7 +83,11 @@
 <div class="wrap">
   <header>
     <h1>Bot Crypto</h1>
-    <span id="stato" class="badge">…</span>
+    <div class="destra">
+      <span class="led" id="ledPc"><i></i>PC</span>
+      <span class="led" id="ledWeb"><i></i>WEB</span>
+      <span id="stato" class="badge">…</span>
+    </div>
   </header>
 
   <div id="errore" class="err"></div>
@@ -130,6 +139,7 @@
   </div>
 
   <div class="foot" id="agg">–</div>
+  <div class="foot" id="dove"></div>
   <div class="foot"><button class="link" id="esci">Blocca la dashboard su questo telefono</button></div>
 </div>
 
@@ -175,7 +185,7 @@ document.getElementById("formBlocco").addEventListener("submit",async e=>{
   e.preventDefault();
   const p=document.getElementById("pwd").value; if(!p) return;
   salvaPwd(p); document.getElementById("erroreBlocco").textContent="Controllo…";
-  await carica();
+  await aggiorna();
 });
 document.getElementById("esci").onclick=()=>{ salvaPwd(null); location.reload(); };
 let ultimoGrezzo=null;
@@ -300,7 +310,36 @@ document.getElementById("tabs").addEventListener("click",e=>{
   giorni=+b.dataset.g; if(dati) disegna();
 });
 document.getElementById("more").onclick=()=>{tutto=true;render();};
-carica(); setInterval(carica,60000);
+// ---- LED: dove sta girando il bot (PC di casa o GitHub "web") ----
+function rawBase(){
+  const h=location.hostname;
+  if(!h.endsWith("github.io")) return null;
+  const owner=h.split(".")[0], repo=location.pathname.split("/").filter(Boolean)[0];
+  return repo?`https://raw.githubusercontent.com/${owner}/${repo}`:null;
+}
+async function testo(url){
+  try{ const r=await fetch(`${url}?t=${Date.now()}`,{cache:"no-store"}); return r.ok?(await r.text()).trim():null; }
+  catch(e){ return null; }
+}
+function led(id,acceso){ document.getElementById(id).className="led "+(acceso?"on":"off"); }
+const fa=s=>s<90?`${Math.round(s)} s fa`:s<5400?`${Math.round(s/60)} min fa`:`${Math.round(s/3600)} ore fa`;
+async function aggiornaLed(){
+  const base=rawBase(); if(!base) return;
+  const [battito,gestore]=await Promise.all([testo(base+"/battito/battito.txt"),testo(base+"/archivio/gestore.txt")]);
+  const ts=parseInt((battito||"").split("\n")[0],10)||0;
+  const silenzio=Date.now()/1000-ts;
+  // stessa regola di GitHub: il PC comanda se ha mandato il segnale di vita negli ultimi 10 minuti
+  const pc=ts>0 && silenzio<600;
+  const daUltimoGiro=dati&&dati.aggiornato?(Date.now()-new Date(dati.aggiornato).getTime())/1000:Infinity;
+  const web=!pc && gestore!=="pc" && daUltimoGiro<30*60;
+  led("ledPc",pc); led("ledWeb",web);
+  document.getElementById("dove").textContent =
+    pc ? `In funzione sul PC di casa · segnale ${fa(silenzio)}` :
+    web ? `In funzione su GitHub (web) · ultimo giro ${fa(daUltimoGiro)}` :
+    "PC spento: GitHub sta per subentrare (può volerci qualche minuto)";
+}
+async function aggiorna(){ await carica(); await aggiornaLed(); }
+aggiorna(); setInterval(aggiorna,60000);
 </script>
 </body>
 </html>
