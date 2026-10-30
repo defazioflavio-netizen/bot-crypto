@@ -64,7 +64,8 @@ CONFIG = {
 
 BASE = "https://revx.revolut.com"
 FUSO = ZoneInfo("Europe/Rome")
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+# sul PC di casa il file dei dati sta fuori dalla cartella del codice (BOT_DATA_FILE); su GitHub resta qui accanto
+DATA_FILE = os.environ.get("BOT_DATA_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
 MAX_PUNTI = 8000
 
 API_KEY = os.environ.get("REVX_API_KEY", "").strip()
