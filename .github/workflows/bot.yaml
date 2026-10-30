@@ -26,14 +26,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Il PC di casa è acceso?
+        id: pc
+        # il PC manda un segnale di vita ogni minuto nel ramo "battito":
+        # se è arrivato da meno di 10 minuti il bot gira sul PC e GitHub non fa nulla
+        run: |
+          ultimo=$(git show origin/battito:battito.txt 2>/dev/null | head -n 1 | tr -cd '0-9')
+          silenzio=$(( $(date +%s) - ${ultimo:-0} ))
+          if [ "$silenzio" -lt 600 ]; then
+            echo "Il PC di casa è attivo (ultimo segnale $silenzio secondi fa): GitHub resta di riserva."
+            echo "attivo=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nessun segnale dal PC da $silenzio secondi: il bot gira su GitHub."
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.pc.outputs.attivo != '1'
         with:
           python-version: "3.12"
 
       - name: Installa librerie
+        if: steps.pc.outputs.attivo != '1'
         run: pip install requests cryptography
 
       - name: Recupera i dati
+        if: steps.pc.outputs.attivo != '1'
         # i dati (cifrati) stanno nel ramo "archivio"; "dati" è il vecchio ramo, usato solo per il passaggio
         run: |
           for ramo in archivio dati; do
@@ -43,7 +60,20 @@ jobs:
             fi
           done
 
+      - name: Avvisa se GitHub prende il posto del PC
+        if: steps.pc.outputs.attivo != '1'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "$(git show origin/archivio:gestore.txt 2>/dev/null)" = "pc" ] && [ -n "$TELEGRAM_TOKEN" ]; then
+            curl -s -o /dev/null "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=🛟 Il PC di casa non dà segni di vita da più di 10 minuti: il bot ora gira su GitHub."
+          fi
+
       - name: Esegui il bot
+        if: steps.pc.outputs.attivo != '1'
         env:
           REVX_API_KEY: ${{ secrets.REVX_API_KEY }}
           REVX_PRIVATE_KEY: ${{ secrets.REVX_PRIVATE_KEY }}
@@ -56,7 +86,7 @@ jobs:
         run: python bot.py
 
       - name: Salva i dati
-        if: always()
+        if: always() && steps.pc.outputs.attivo != '1'
         run: |
           [ -f data.json ] || exit 0
           cp data.json /tmp/data.json
@@ -69,6 +99,9 @@ jobs:
             git rm -rf --cached . >/dev/null 2>&1 || true
           fi
           cp /tmp/data.json data.json
-          git add data.json
-          git diff --cached --quiet || git commit -m "Aggiornamento dati"
-          git push origin archivio
+          echo github > gestore.txt
+          git add data.json gestore.txt
+          git commit -q -m "Aggiornamento dati" || true
+          # il ramo tiene un solo commit (l'ultimo stato): così non si gonfia con migliaia di versioni
+          git reset -q --soft "$(git commit-tree 'HEAD^{tree}' -m 'Aggiornamento dati')"
+          git push -f origin archivio
