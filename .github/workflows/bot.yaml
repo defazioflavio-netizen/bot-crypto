@@ -33,6 +33,8 @@ jobs:
         run: |
           ultimo=$(git show origin/battito:battito.txt 2>/dev/null | head -n 1 | tr -cd '0-9')
           silenzio=$(( $(date +%s) - ${ultimo:-0} ))
+          # "0" = il PC è stato fermato a mano (Ctrl+C): GitHub subentra senza mandare l'avviso 🛟
+          if [ "${ultimo:-}" = "0" ]; then echo "fermato_a_mano=1" >> "$GITHUB_OUTPUT"; fi
           if [ "$silenzio" -lt 600 ]; then
             echo "Il PC di casa è attivo (ultimo segnale $silenzio secondi fa): GitHub resta di riserva."
             echo "attivo=1" >> "$GITHUB_OUTPUT"
@@ -61,7 +63,7 @@ jobs:
           done
 
       - name: Avvisa se GitHub prende il posto del PC
-        if: steps.pc.outputs.attivo != '1'
+        if: steps.pc.outputs.attivo != '1' && steps.pc.outputs.fermato_a_mano != '1'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
