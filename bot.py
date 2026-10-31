@@ -1,14 +1,14 @@
 """
 Bot crypto per Revolut X - esperimento personale.
 
-Gira su GitHub Actions ogni 15 minuti:
+Gira sul PC di casa ogni 45 secondi (GitHub Actions fa da riserva):
   1. legge i comandi Telegram
-  2. scarica prezzi e candele da Revolut X
-  3. applica la strategia (trend EMA + RSI, stop loss, trailing stop)
-  4. compra/vende con ordini market
+  2. ogni ora sceglie le crypto in euro più scambiate e prova centinaia di strategie sul loro storico
+  3. scarica prezzi e candele da Revolut X e applica la strategia migliore (trend o rimbalzo, stop loss, trailing stop)
+  4. compra/vende con ordini market e spiega per ogni crypto cosa vede e cosa manca per comprare
   5. salva tutto in data.json (letto dalla dashboard)
 
-Le chiavi NON stanno in questo file: arrivano dai "Secrets" di GitHub.
+Le chiavi NON stanno in questo file: arrivano dai "Secrets" di GitHub o da impostazioni.json sul PC.
 """
 
 import base64
@@ -47,15 +47,22 @@ CONFIG = {
 
     # Apprendimento: ogni giorno riprova 108 varianti della strategia sugli ultimi 60 giorni
     # di ogni crypto e adotta la migliore, solo se regge anche sui giorni più recenti
-    "asset_candidati": ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"],
+    "asset_candidati": ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"],  # usate se la ricerca automatica non va
+    "tutte_le_crypto": True,         # guarda tutte le crypto in euro di Revolut X (non solo l'elenco sopra)
+    "max_candidati": 12,             # ...tenendo le più scambiate (le altre hanno prezzi poco affidabili)
+    "volume_minimo_24h": 25_000,     # EUR scambiati nelle ultime 24 ore per essere presa in considerazione
+    "escluse": ["USDT", "USDC", "EURC", "EUROC", "DAI", "PYUSD", "FDUSD", "TUSD", "USDE", "RLUSD", "USD1", "EURT", "USDP", "GUSD"],
+                                     # stablecoin: valgono sempre ~1 dollaro/euro, non ha senso farci trading
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
-    "ottimizza_ogni_ore": 4,         # ogni 4 ore rifà l'analisi del mercato
+    "ottimizza_ogni_ore": 1,         # ogni ora rifà l'analisi del mercato
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
-    "giorni_storico_15m": 20,
-    "strategie_veloci": False,       # candele da 15 minuti: attivale (True) solo se il bot gira davvero ogni pochi minuti        # storico per le strategie veloci su candele da 15 minuti
+    "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
+    "strategie_veloci": True,        # candele da 15 minuti (il bot gira sul PC ogni 45 secondi)
+    "min_operazioni_test": 6,        # una strategia vale solo se nelle simulazioni ha fatto almeno 6 operazioni...
+    "min_operazioni_verifica": 2,    # ...di cui almeno 2 nel periodo di verifica: pochi colpi fortunati non bastano
     "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
-    "peso_rischio": 0.3,
-    "crollo_max_7g": 0.25,           # strategia "rimbalzo": non compra se la crypto è scesa più del 25% in 7 giorni             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
+    "peso_rischio": 0.3,             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
+    "crollo_max_7g": 0.25,           # strategia "rimbalzo": non compra se la crypto è scesa più del 25% in 7 giorni
     "pausa_dopo_vendita_ore": 6,     # dopo una vendita aspetta prima di ricomprare la stessa crypto
     "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
@@ -182,19 +189,26 @@ class RevX:
         # scarta la candela ancora aperta
         return [c for c in candele if c["start"] + intervallo * 60_000 <= adesso]
 
-    def storico(self, simbolo, ore, minuti=60):
-        """Candele da `minuti` (60 o 15) delle ultime `ore`, scaricate a blocchi da 100."""
+    def storico(self, simbolo, ore, minuti=60, cache=None):
+        """Candele da `minuti` (60 o 15) delle ultime `ore`, scaricate a blocchi da 100.
+        Con `cache` (un dizionario) riscarica solo le candele nuove dall'ultima volta."""
         passo = minuti * 60_000
         fine = ora_ms() // passo * passo
-        quante = ore * 60 // minuti
+        inizio_finestra = fine - (ore * 60 // minuti) * passo
+        chiave = f"{simbolo}|{minuti}"
         tutte = {}
-        while quante > 0:
-            blocco = min(quante, 100)
-            inizio = fine - blocco * passo
-            res = self._call("GET", f"/candles/{simbolo}", query=f"interval={minuti}&since={inizio}&until={fine}")
+        if cache is not None:
+            tutte = {int(k): v for k, v in cache.get(chiave, {}).items() if int(k) >= inizio_finestra}
+        # dal punto in cui si era fermata la volta prima (riscaricando l'ultima candela, che poteva essere incompleta)
+        da = max(inizio_finestra, max(tutte) - passo) if tutte else inizio_finestra
+        while da < fine:
+            a = min(fine, da + 100 * passo)
+            res = self._call("GET", f"/candles/{simbolo}", query=f"interval={minuti}&since={da}&until={a}")
             for c in res["data"]:
-                tutte[c["start"]] = c
-            fine, quante = inizio, quante - blocco
+                tutte[int(c["start"])] = {"start": int(c["start"]), "close": c["close"], "volume": c.get("volume")}
+            da = a
+        if cache is not None:
+            cache[chiave] = {str(k): v for k, v in tutte.items()}
         adesso = ora_ms()
         return [tutte[k] for k in sorted(tutte) if k + passo <= adesso]
 
@@ -395,21 +409,71 @@ def strategia_iniziale():
     return P
 
 
+CACHE_FILE = os.path.join(os.path.dirname(DATA_FILE), "cache_candele.json")
+
+
+def carica_cache():
+    try:
+        with open(CACHE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def salva_cache(cache):
+    try:
+        with open(CACHE_FILE + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(cache, f, separators=(",", ":"))
+        os.replace(CACHE_FILE + ".tmp", CACHE_FILE)
+    except Exception as e:
+        print("cache non salvata:", e)
+
+
+def scegli_candidati(api, coppie, dati):
+    """Le crypto in euro più scambiate nelle ultime 24 ore (escluse le stablecoin)."""
+    valuta = CONFIG["valuta"]
+    attive = lambda a: f"{a}/{valuta}" in coppie and coppie[f"{a}/{valuta}"].get("status", "active") == "active"
+    predefinite = [a for a in CONFIG["asset_candidati"] if attive(a)]
+    if not CONFIG.get("tutte_le_crypto"):
+        return predefinite
+    escluse = set(CONFIG["escluse"]) | {valuta}
+    tutte = sorted({k.split("/")[0] for k in coppie if k.endswith("/" + valuta)} - escluse)
+    volumi = {}
+    for a in tutte:
+        if not attive(a):
+            continue
+        try:
+            cc = api.candele(f"{a}-{valuta}", 60, 25)
+            volumi[a] = round(sum(float(c.get("volume") or 0) * float(c.get("close") or 0) for c in cc))
+        except Exception as e:
+            print("volume", a, e)
+    liquide = sorted((a for a in volumi if volumi[a] >= CONFIG["volume_minimo_24h"]), key=volumi.get, reverse=True)
+    dati["mercato"] = {"t": ora_ms(), "crypto_in_euro": len(tutte), "volumi_24h": dict(sorted(volumi.items(), key=lambda x: -x[1])[:30])}
+    if len(liquide) < 3:
+        return predefinite  # dati di volume assenti o strani: meglio l'elenco sicuro
+    return liquide[:CONFIG["max_candidati"]]
+
+
 def ottimizza(api, dati, coppie):
     """Apprendimento: riprova tutte le varianti sugli ultimi giorni e tiene la migliore.
     Allenamento sui primi 2/3 del periodo, verifica sull'ultimo 1/3 (dati che la scelta non ha visto)."""
     valuta, costo = CONFIG["valuta"], CONFIG["costo_per_operazione"]
-    candidati = [a for a in CONFIG["asset_candidati"]
-                 if coppie.get(f"{a}/{valuta}", {}).get("status", "active") == "active" and f"{a}/{valuta}" in coppie]
+    candidati = scegli_candidati(api, coppie, dati)
+    # le crypto in mano vanno sempre analizzate, anche se sono uscite dalla lista
+    candidati += [a for a in dati.get("posizioni", {}) if a not in candidati]
+    cache = carica_cache()
     storici, storici15 = {}, {}
     for a in candidati:
         try:
-            st = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico"] * 24)
-            st15 = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico_15m"] * 24, 15) if 15 in intervalli() else []
+            st = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico"] * 24, cache=cache)
+            st15 = api.storico(f"{a}-{valuta}", CONFIG["giorni_storico_15m"] * 24, 15, cache=cache) if 15 in intervalli() else []
             if len(st) >= 24 * 20 and (15 not in intervalli() or len(st15) >= 96 * 7):
                 storici[a], storici15[a] = st, st15
         except Exception as e:
             print("storico", a, e)
+        salva_cache(cache)  # salva man mano: se il giro venisse interrotto, la volta dopo riparte da qui
+    # tiene in cache solo le crypto analizzate adesso
+    salva_cache({k: v for k, v in cache.items() if k.split("-")[0] in candidati})
     if not storici:
         return None
 
@@ -437,10 +501,15 @@ def ottimizza(api, dati, coppie):
             risultati[a] = {"train": (r_tr - CONFIG["peso_rischio"] * dd_tr) * 10 / giorni_tr,
                             "verifica": (r_va - CONFIG["peso_rischio"] * dd_va) * 10 / giorni_va,
                             "rend_train": r_tr, "rend_verifica": r_va, "operazioni": n_tr + n_va,
+                            "operazioni_verifica": n_va,
                             "operazioni_verifica_al_giorno": round(n_va / giorni_va, 1)}
         # le crypto migliori in allenamento, ma solo se guadagnano anche nella verifica
+        # e con abbastanza operazioni da non essere solo un paio di colpi fortunati
+        affidabile = lambda a: (risultati[a]["operazioni"] >= CONFIG["min_operazioni_test"] and
+                                risultati[a]["operazioni_verifica"] >= CONFIG["min_operazioni_verifica"])
         ordinate = sorted(risultati, key=lambda a: risultati[a]["train"], reverse=True)
-        scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0][:CONFIG["max_asset_attivi"]]
+        scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0
+                  and affidabile(a)][:CONFIG["max_asset_attivi"]]
         top = ordinate[:CONFIG["max_asset_attivi"]]
         punteggio_train = sum(risultati[a]["train"] for a in top) / len(top)
         punteggio_ver = (sum(risultati[a]["verifica"] for a in scelte) / len(scelte)) if scelte else -1
@@ -478,7 +547,8 @@ def ottimizza(api, dati, coppie):
         "giorni_verifica": (CONFIG["giorni_storico_15m"] if P["intervallo_candele"] == 15 else CONFIG["giorni_storico"]) // 3,
         "operazioni_al_giorno": round(sum(ris[a]["operazioni_verifica_al_giorno"] for a in scelte) / len(scelte), 1) if scelte else 0,
         "classifica": {a: {"verifica_%": round(ris[a]["rend_verifica"] * 100, 2),
-                           "allenamento_%": round(ris[a]["rend_train"] * 100, 2)} for a in ris},
+                           "allenamento_%": round(ris[a]["rend_train"] * 100, 2),
+                           "operazioni": ris[a]["operazioni"]} for a in ris},
         "varianti_provate": sum(1 for _ in griglia()),
     })
     cambiata = chiave(nuova) != chiave(attuale) or nuova["asset"] != attuale.get("asset")
@@ -508,10 +578,89 @@ def descrivi_strategia(P):
                  f"<b>Crypto:</b> {crypto}",
                  f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
                  f"<b>Stop loss:</b> -{P['stop_loss']*100:.1f}% · <b>trailing:</b> -{P['trailing_stop']*100:.1f}% dopo +{P['attiva_trailing_dopo']*100:.1f}%".replace(".0%", "%")]
+    if P.get("classifica"):
+        righe.insert(2, f"<b>Analizzate:</b> {len(P['classifica'])} crypto · {P.get('varianti_provate', '–')} strategie ciascuna · "
+                        f"valide solo con almeno {CONFIG['min_operazioni_test']} operazioni simulate")
     if P.get("rendimento_verifica") is not None:
         righe.append(f"<b>Test sugli ultimi {P.get('giorni_verifica', 20)} giorni:</b> {P['rendimento_verifica']:+.2f}% (simulazione al netto dei costi, non è una promessa)")
         righe.append(f"<b>Operazioni previste:</b> circa {P.get('operazioni_al_giorno', 0)} al giorno per crypto")
     return "\n".join(righe)
+
+
+# ---------------------------------------------------------------------------
+# SPIEGAZIONI: cosa vede il bot e cosa manca per comprare
+# ---------------------------------------------------------------------------
+def fmt_prezzo(x):
+    """Prezzo leggibile anche per le crypto che valgono pochi centesimi."""
+    x = float(x)
+    decimali = 2 if x >= 10 else 4 if x >= 0.1 else 6
+    return f"{x:,.{decimali}f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def prezzo_per_rsi(valori, periodo, soglia):
+    """Stima: a che prezzo dovrebbe chiudere la prossima candela perché l'RSI scenda sotto `soglia`."""
+    if len(valori) <= periodo:
+        return None
+    mg = sum(max(valori[i] - valori[i - 1], 0) for i in range(1, periodo + 1)) / periodo
+    mp = sum(max(valori[i - 1] - valori[i], 0) for i in range(1, periodo + 1)) / periodo
+    for i in range(periodo + 1, len(valori)):
+        d = valori[i] - valori[i - 1]
+        mg = (mg * (periodo - 1) + max(d, 0)) / periodo
+        mp = (mp * (periodo - 1) + max(-d, 0)) / periodo
+    mg_dopo = mg * (periodo - 1) / periodo
+    calo = mg_dopo * (100 - soglia) / soglia * periodo - mp * (periodo - 1)
+    return valori[-1] - calo if 0 <= calo < valori[-1] else None
+
+
+def spiega(P, dati, a, ch, ef, el, r, fa7):
+    """Una frase su cosa sta facendo il bot con questa crypto."""
+    pos = dati["posizioni"].get(a)
+    if pos:
+        entrata = pos["prezzo_ingresso"]
+        stop = entrata * (1 - P["stop_loss"])
+        if tipo(P) == "rimbalzo":
+            return (f"In mano da {fmt_prezzo(entrata)}: vende se scende a {fmt_prezzo(stop)} (stop loss), se sale a "
+                    f"{fmt_prezzo(entrata * (1 + P['take_profit']))} (obiettivo) o se l'RSI supera {P['rsi_uscita']}")
+        if pos["picco"] >= entrata * (1 + P["attiva_trailing_dopo"]):
+            return f"In guadagno: vende se scende a {fmt_prezzo(pos['picco'] * (1 - P['trailing_stop']))} (protegge il guadagno) o se la tendenza gira"
+        return (f"In mano da {fmt_prezzo(entrata)}: stop loss a {fmt_prezzo(stop)}; da {fmt_prezzo(entrata * (1 + P['attiva_trailing_dopo']))} "
+                f"in su protegge il guadagno; vende anche se la tendenza gira")
+    if dati["stato"] != "attivo":
+        return f"Bot {dati['stato']}: niente nuovi acquisti"
+    fine_pausa = dati["ultima_vendita"].get(a, 0) + pausa_ore(P["intervallo_candele"]) * 3_600_000
+    if ora_ms() < fine_pausa:
+        return f"Venduta da poco: può ricomprarla dalle {datetime.fromtimestamp(fine_pausa / 1000, FUSO):%H:%M}"
+    mancano = []
+    if tipo(P) == "rimbalzo":
+        if r >= P["rsi_ingresso"]:
+            soglia = prezzo_per_rsi(ch, CONFIG["rsi_periodo"], P["rsi_ingresso"])
+            mancano.append(f"RSI {r:.0f}, deve scendere sotto {P['rsi_ingresso']}"
+                           + (f" (una candela che chiude sotto ~{fmt_prezzo(soglia)})" if soglia else ""))
+        if ch[-1] >= el:
+            mancano.append(f"prezzo ancora sopra la sua media ({fmt_prezzo(el)})")
+        if fa7 and ch[-1] < fa7 * (1 - CONFIG["crollo_max_7g"]):
+            mancano.append(f"è crollata più del {CONFIG['crollo_max_7g']*100:.0f}% in 7 giorni: troppo rischioso")
+    else:
+        if ef <= el:
+            mancano.append(f"tendenza al ribasso: deve tornare sopra {fmt_prezzo(el)} e restarci")
+        elif ch[-1] <= el:
+            mancano.append(f"prezzo sotto la media ({fmt_prezzo(el)}): deve risalire sopra")
+        if r >= P["rsi_max_ingresso"]:
+            soglia = prezzo_per_rsi(ch, CONFIG["rsi_periodo"], P["rsi_max_ingresso"])
+            mancano.append(f"RSI {r:.0f} troppo alto (max {P['rsi_max_ingresso']}): mercato surriscaldato"
+                           + (f", ok sotto ~{fmt_prezzo(soglia)}" if soglia else ""))
+    return ("Aspetta: " + "; ".join(mancano)) if mancano else "Condizioni per comprare presenti"
+
+
+def elenco_spiegazioni(dati):
+    sg = dati.get("segnali") or {}
+    if not sg:
+        return "Nessuna crypto sotto osservazione in questo momento."
+    righe = []
+    for a, s in sg.items():
+        freccia = "▲" if s.get("trend") == "rialzo" else "▼"
+        righe.append(f"<b>{a}</b> {fmt_prezzo(s['prezzo'])} {freccia} · RSI {s.get('rsi')}\n{s.get('nota', '')}")
+    return "\n\n".join(righe)
 
 
 def arrotonda_giu(valore, passo):
@@ -669,6 +818,8 @@ def riepilogo(dati, valore, dettagliato=False):
         righe.append("• Nessuna posizione aperta, tutto in liquidità")
     if dettagliato and dati.get("strategia"):
         righe.append("\n🧠 <b>Strategia</b>\n" + descrivi_strategia(dati["strategia"]))
+    if dettagliato and dati.get("segnali"):
+        righe.append("\n🔎 <b>Cosa vede il bot</b>\n" + elenco_spiegazioni(dati))
     if dettagliato and dati["operazioni"]:
         righe.append("\n<b>Ultime operazioni:</b>")
         for op in dati["operazioni"][-5:]:
@@ -854,9 +1005,12 @@ def main():
             tg_invia("<b>Comandi</b>\n/stato – situazione attuale\n/report – situazione + ultime operazioni\n"
                      "/pausa – niente nuovi acquisti (stop loss resta attivo)\n/riprendi – riattiva il bot\n"
                      "/vendi_tutto – vende tutto e mette in pausa\n/strategia – strategia attuale\n"
+                     "/perche – cosa vede il bot e cosa aspetta per comprare\n"
                      "/ottimizza – ricalcola subito la strategia")
         elif c == "/strategia":
             tg_invia("🧠 <b>Strategia attuale</b>\n" + descrivi_strategia(P))
+        elif c in ("/perche", "/perché"):
+            tg_invia("🔎 <b>Cosa vede il bot</b>\n\n" + elenco_spiegazioni(dati))
         elif c == "/stato":
             tg_invia(riepilogo(dati, valore))
         elif c == "/report":
@@ -913,8 +1067,10 @@ def main():
                         fa7 = float(orarie[-7 * 24]["close"])
                 except Exception:
                     pass
-            dati["segnali"][a] = {"prezzo": bid, "ema_veloce": round(ef, 2), "ema_lenta": round(el, 2),
-                                  "rsi": round(r, 1), "trend": "rialzo" if trend_su else "ribasso", "t": ora_ms()}
+            cifre = lambda x: float(f"{x:.6g}")  # anche per le crypto da pochi centesimi
+            dati["segnali"][a] = {"prezzo": bid, "ema_veloce": cifre(ef), "ema_lenta": cifre(el),
+                                  "rsi": round(r, 1), "trend": "rialzo" if trend_su else "ribasso", "t": ora_ms(),
+                                  "nota": spiega(P, dati, a, ch, ef, el, r, fa7)}
             if fa7:
                 dati["segnali"][a]["variazione_7g"] = round((bid / fa7 - 1) * 100, 1)
 
@@ -925,6 +1081,8 @@ def main():
                 if motivo:
                     qty = qty_vendibile(dati, saldi, a)
                     vendi(api, dati, a, qty, bid, coppie, motivo)
+                    if a not in dati["posizioni"]:
+                        dati["segnali"][a]["nota"] = "Appena venduta: " + motivo
                     saldi = api.saldi()
             elif a in P["asset"] and dati["stato"] == "attivo" and entra(P, ch[-1], ef, el, r, fa7):
                 pausa = pausa_ore(P["intervallo_candele"]) * 3_600_000
@@ -938,8 +1096,12 @@ def main():
                     motivo = (f"rimbalzo: crypto scesa troppo (RSI {r:.0f} sotto {P['rsi_ingresso']})"
                               if tipo(P) == "rimbalzo" else
                               f"trend in rialzo (EMA{P['ema_veloce']} sopra EMA{P['ema_lenta']}), RSI {r:.0f}")
-                    compra(api, dati, a, importo, ask, coppie, motivo)
+                    if compra(api, dati, a, importo, ask, coppie, motivo):
+                        dati["segnali"][a]["nota"] = "Appena comprata: " + motivo
                     saldi = api.saldi()
+                else:
+                    dati["segnali"][a]["nota"] = ("Condizioni per comprare presenti, ma la liquidità libera del bot "
+                                                  f"({euro(disponibile)}) è già impegnata sulle altre crypto")
 
     # valore finale e curva
     prezzi = api.ticker(list(prezzi.keys()))

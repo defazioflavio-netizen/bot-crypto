@@ -69,6 +69,8 @@
   .blocco button{width:100%;font-size:16px;font-weight:650;padding:13px;border:0;border-radius:12px;background:var(--accent);color:#fff}
   .blocco .errore{color:var(--down);font-size:13px;min-height:18px;margin-top:10px}
   .link{background:none;border:0;color:var(--muted);font-size:12px;text-decoration:underline;margin-top:6px}
+  .nota{font-size:12.5px;color:var(--text);opacity:.85;margin-top:4px;line-height:1.35}
+  .row .r{flex-shrink:0;padding-left:10px}
   .more{width:100%;background:var(--line);color:var(--text);border:0;border-radius:10px;padding:9px;margin-top:8px;font-weight:600}
 </style>
 </head>
@@ -128,7 +130,7 @@
   </div>
 
   <div class="card">
-    <h2>Strategia · si riadatta ogni giorno</h2>
+    <h2>Strategia · si riadatta ogni ora</h2>
     <div id="strategia"></div>
   </div>
 
@@ -145,6 +147,9 @@
 
 <script>
 const fmt = n => (n==null||isNaN(n)) ? "–" : n.toLocaleString("it-IT",{style:"currency",currency:"EUR"});
+// prezzi delle crypto: più decimali per quelle che valgono pochi centesimi
+const fmtP = n => (n==null||isNaN(n)) ? "–" : n.toLocaleString("it-IT",{style:"currency",currency:"EUR",
+  minimumFractionDigits: n>=10?2:n>=0.1?4:6, maximumFractionDigits: n>=10?2:n>=0.1?4:6});
 const pct = n => (n>=0?"+":"") + n.toFixed(2).replace(".",",") + "%";
 const dt = t => new Date(t).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
 let dati=null, chart=null, giorni=0, tutto=false;
@@ -238,14 +243,15 @@ function render(){
   pEl.innerHTML = keys.length ? keys.map(a=>{
     const p=pos[a], prezzo=sg[a]?.prezzo, q=parseFloat(p.qty), v=prezzo?q*prezzo:null;
     const r=prezzo?(prezzo/p.prezzo_ingresso-1)*100:null;
-    return `<div class="row"><div><div class="t">${a}</div><div class="s">${q} · comprato a ${fmt(p.prezzo_ingresso)}</div></div>
+    return `<div class="row"><div><div class="t">${a}</div><div class="s">${q} · comprato a ${fmtP(p.prezzo_ingresso)}</div></div>
       <div class="r"><div class="t">${fmt(v)}</div><div class="s ${r>=0?"up":"down"}">${r==null?"":pct(r)}</div></div></div>`;
   }).join("") : `<div class="empty">Nessuna posizione: liquidità ${fmt(d.liquidita)}</div>`;
 
   // segnali
   const sEl=document.getElementById("segnali"), sk=Object.keys(sg);
   sEl.innerHTML = sk.length ? sk.map(a=>{const s=sg[a];
-    return `<div class="row"><div><div class="t">${a} · ${fmt(s.prezzo)}</div><div class="s">RSI ${s.rsi} · EMA ${fmt(s.ema_veloce)} / ${fmt(s.ema_lenta)}</div></div>
+    return `<div class="row"><div><div class="t">${a} · ${fmtP(s.prezzo)}</div><div class="s">RSI ${s.rsi} · EMA ${fmtP(s.ema_veloce)} / ${fmtP(s.ema_lenta)}</div>
+      ${s.nota?`<div class="nota">${s.nota}</div>`:""}</div>
       <div class="r"><div class="t ${s.trend==="rialzo"?"up":"down"}">${s.trend==="rialzo"?"▲ rialzo":"▼ ribasso"}</div></div></div>`}).join("")
     : `<div class="empty">Nessuna analisi ancora</div>`;
 
@@ -256,7 +262,7 @@ function render(){
     const crypto=(P.asset&&P.asset.length)?P.asset.join(", "):"nessuna: mercato sfavorevole, resta in liquidità";
     const cl=P.classifica||{}, nomi=Object.keys(cl).sort((a,b)=>cl[b]["verifica_%"]-cl[a]["verifica_%"]);
     stEl.innerHTML=`
-      <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra ${Object.keys(cl).length||"–"} analizzate</div></div><div class="r"><div class="t">${crypto}</div></div></div>
+      <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra le ${Object.keys(cl).length||"–"} più scambiate${d.mercato?.crypto_in_euro?` (su ${d.mercato.crypto_in_euro} in euro)`:""} · analisi ogni ora</div></div><div class="r"><div class="t">${crypto}</div></div></div>
       ${P.tipo==="rimbalzo"
         ? `<div class="row"><div><div class="t">Tipo: rimbalzo</div><div class="s">candele ${ore} · compra con RSI sotto ${P.rsi_ingresso}, rivende sopra ${P.rsi_uscita}</div></div>
             <div class="r"><div class="s">obiettivo +${Math.round(P.take_profit*100)}%<br>stop -${Math.round(P.stop_loss*100)}%</div></div></div>`
@@ -264,7 +270,7 @@ function render(){
             <div class="r"><div class="s">stop -${+(P.stop_loss*100).toFixed(1)}%<br>trailing -${+(P.trailing_stop*100).toFixed(1)}% dopo +${+(P.attiva_trailing_dopo*100).toFixed(1)}%</div></div></div>`}
       <div class="row"><div><div class="t">Simulazione ultimi ${P.giorni_verifica||20} giorni</div><div class="s">${P.varianti_provate||"–"} varianti · ~${P.operazioni_al_giorno??0} operazioni/giorno · ${P.aggiornata?dt(P.aggiornata):"non ancora ottimizzata"}</div></div>
         <div class="r"><div class="t ${(P.rendimento_verifica||0)>=0?"up":"down"}">${P.rendimento_verifica==null?"–":pct(P.rendimento_verifica)}</div></div></div>
-      ${nomi.map(a=>`<div class="row"><div><div class="t">${a}${(P.asset||[]).includes(a)?" ✓":""}</div><div class="s">allenamento ${pct(cl[a]["allenamento_%"])}</div></div>
+      ${nomi.map(a=>`<div class="row"><div><div class="t">${a}${(P.asset||[]).includes(a)?" ✓":""}</div><div class="s">allenamento ${pct(cl[a]["allenamento_%"])}${cl[a].operazioni!=null?` · ${cl[a].operazioni} operazioni simulate`:""}</div></div>
         <div class="r"><div class="s ${cl[a]["verifica_%"]>=0?"up":"down"}">verifica ${pct(cl[a]["verifica_%"])}</div></div></div>`).join("")}`;
   } else stEl.innerHTML=`<div class="empty">La prima analisi arriva al primo giro</div>`;
 
