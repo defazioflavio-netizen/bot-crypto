@@ -33,15 +33,21 @@ CONFIG = {
     "valuta": "EUR",                 # valuta del conto su Revolut X
     "capitale_bot": 100.0,           # EUR di partenza. Il bot usa solo questi + i suoi guadagni:
                                      # eventuali altri soldi sul conto non vengono mai toccati
-    # Strategia di partenza: ogni giorno il bot la ricalcola da solo (vedi "apprendimento" sotto)
-    "asset": ["BTC", "ETH"],         # crypto usate finché non fa la prima ottimizzazione
-    "intervallo_candele": 60,        # minuti per candela (60 = 1 ora)
+    # Strategia di base: "rimbalzo" su candele da 4 ore. Nelle simulazioni con i costi reali di Revolut X
+    # (60 giorni, 3 periodi diversi, crypto liquide) è l'unica che è rimasta in positivo in tutti i periodi.
+    # Il bot la sostituisce solo se ne trova una migliore sia in allenamento sia in verifica.
+    "tipo": "rimbalzo",
+    "asset": ["BTC", "ETH", "XRP"],  # crypto usate finché non fa la prima ottimizzazione
+    "intervallo_candele": 240,       # minuti per candela (240 = 4 ore)
     "ema_veloce": 20,
     "ema_lenta": 50,
     "rsi_periodo": 14,
-    "rsi_max_ingresso": 70,          # non compra se RSI sopra (mercato "surriscaldato")
-    "stop_loss": 0.05,               # vende se scende del 5% dal prezzo di acquisto
-    "attiva_trailing_dopo": 0.03,    # dopo +3% di guadagno attiva il trailing stop
+    "rsi_ingresso": 30,              # rimbalzo: compra quando l'RSI scende sotto 30 (crypto "ipervenduta")...
+    "rsi_uscita": 55,                # ...e rivende quando risale sopra 55
+    "take_profit": 0.06,             # ...o appena guadagna il 6%
+    "rsi_max_ingresso": 70,          # trend: non compra se RSI sopra (mercato "surriscaldato")
+    "stop_loss": 0.08,               # vende se scende dell'8% dal prezzo di acquisto
+    "attiva_trailing_dopo": 0.03,    # trend: dopo +3% di guadagno attiva il trailing stop
     "trailing_stop": 0.03,           # ...e vende se scende del 3% dal massimo raggiunto
     "ordine_minimo": 5.0,            # EUR, sotto questa cifra non apre ordini
 
@@ -50,23 +56,29 @@ CONFIG = {
     "asset_candidati": ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"],  # usate se la ricerca automatica non va
     "tutte_le_crypto": True,         # guarda tutte le crypto in euro di Revolut X (non solo l'elenco sopra)
     "max_candidati": 12,             # ...tenendo le più scambiate (le altre hanno prezzi poco affidabili)
-    "volume_minimo_24h": 25_000,     # EUR scambiati nelle ultime 24 ore per essere presa in considerazione
+    "volume_minimo_24h": 100_000,    # EUR scambiati nelle ultime 24 ore per essere presa in considerazione
+    "spread_max": 0.005,             # esclude le crypto con differenza tra prezzo di acquisto e di vendita sopra lo 0,5%
+                                     # (es. PEPE in euro: spread ~0,8% e prezzi "a scatti" per mancanza di scambi)
     "escluse": ["USDT", "USDC", "EURC", "EUROC", "DAI", "PYUSD", "FDUSD", "TUSD", "USDE", "RLUSD", "USD1", "EURT", "USDP", "GUSD"],
                                      # stablecoin: valgono sempre ~1 dollaro/euro, non ha senso farci trading
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
     "ottimizza_ogni_ore": 1,         # ogni ora rifà l'analisi del mercato
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
     "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
-    "strategie_veloci": True,        # candele da 15 minuti (il bot gira sul PC ogni 45 secondi)
-    "min_operazioni_test": 6,        # una strategia vale solo se nelle simulazioni ha fatto almeno 6 operazioni...
-    "min_operazioni_verifica": 2,    # ...di cui almeno 2 nel periodo di verifica: pochi colpi fortunati non bastano
-    "costo_per_operazione": 0.0015,  # commissione + spread stimati per ogni acquisto o vendita
+    "strategie_veloci": False,       # candele da 15 minuti: con i costi reali di Revolut X perdevano sempre (spento)
+    "min_operazioni_test": 12,       # una strategia vale solo se nelle simulazioni ha fatto almeno 12 operazioni (su tutte le crypto)...
+    "min_operazioni_verifica": 4,    # ...di cui almeno 4 nel periodo di verifica: pochi colpi fortunati non bastano
+    "costo_per_operazione": 0.0015,  # usato solo se lo spread di una crypto non è ancora stato misurato
+    "commissione": 0.0009,           # commissione Revolut X per ordine market (0,09%)
+    "slittamento": 0.0005,           # margine prudenziale per ordini eseguiti a prezzi un po' peggiori
+    "stop_emergenza_x": 1.5,         # tra una candela e l'altra vende subito solo se il calo è 1,5 volte lo stop loss
     "peso_rischio": 0.3,             # quanto penalizza i cali (0 = cerca solo il massimo guadagno)
     "crollo_max_7g": 0.25,           # strategia "rimbalzo": non compra se la crypto è scesa più del 25% in 7 giorni
     "pausa_dopo_vendita_ore": 6,     # dopo una vendita aspetta prima di ricomprare la stessa crypto
     "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
     "ora_report": 21,                # ora (Italia) del resoconto giornaliero su Telegram
+    "versione_logica": 2,            # se cambia, il bot ricalcola subito la strategia
 }
 
 BASE = "https://revx.revolut.com"
@@ -394,6 +406,14 @@ def griglia_trend():
                                "trailing_stop": tr, "attiva_trailing_dopo": att}
 
 
+def costo_reale(dati, a):
+    """Costo di un acquisto o di una vendita per questa crypto: commissione + metà dello spread medio misurato + margine."""
+    sp = (dati.get("spread") or {}).get(a)
+    if sp is None:
+        return CONFIG["costo_per_operazione"]
+    return CONFIG["commissione"] + sp / 2 + CONFIG["slittamento"]
+
+
 def pausa_ore(intervallo):
     return CONFIG["pausa_dopo_vendita_ore_15m"] if intervallo == 15 else CONFIG["pausa_dopo_vendita_ore"]
 
@@ -403,8 +423,9 @@ def chiave(P):
 
 
 def strategia_iniziale():
-    P = {k: CONFIG[k] for k in ("intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
-                                "stop_loss", "trailing_stop", "attiva_trailing_dopo")}
+    P = {k: CONFIG[k] for k in ("tipo", "intervallo_candele", "ema_veloce", "ema_lenta", "rsi_max_ingresso",
+                                "stop_loss", "trailing_stop", "attiva_trailing_dopo",
+                                "rsi_ingresso", "rsi_uscita", "take_profit")}
     P.update({"asset": list(CONFIG["asset"]), "aggiornata": None, "origine": "impostazioni iniziali"})
     return P
 
@@ -448,16 +469,42 @@ def scegli_candidati(api, coppie, dati):
         except Exception as e:
             print("volume", a, e)
     liquide = sorted((a for a in volumi if volumi[a] >= CONFIG["volume_minimo_24h"]), key=volumi.get, reverse=True)
-    dati["mercato"] = {"t": ora_ms(), "crypto_in_euro": len(tutte), "volumi_24h": dict(sorted(volumi.items(), key=lambda x: -x[1])[:30])}
+    # spread reale (differenza tra prezzo di acquisto e di vendita), media mobile delle misure orarie
+    misura_spread(api, dati, liquide)
+    spread = dati.get("spread", {})
+    scartate = {a: round(spread[a] * 100, 2) for a in liquide if spread.get(a, 1) > CONFIG["spread_max"]}
+    liquide = [a for a in liquide if spread.get(a, 1) <= CONFIG["spread_max"]]
+    dati["mercato"] = {"t": ora_ms(), "crypto_in_euro": len(tutte), "volumi_24h": dict(sorted(volumi.items(), key=lambda x: -x[1])[:30]),
+                       "spread_%": {a: round(v * 100, 3) for a, v in sorted(spread.items(), key=lambda x: x[1])},
+                       "escluse_per_spread_%": scartate}
     if len(liquide) < 3:
-        return predefinite  # dati di volume assenti o strani: meglio l'elenco sicuro
+        return [a for a in predefinite if spread.get(a, 0) <= CONFIG["spread_max"]] or predefinite
     return liquide[:CONFIG["max_candidati"]]
+
+
+def misura_spread(api, dati, asset):
+    valuta = CONFIG["valuta"]
+    spread = dati.setdefault("spread", {})
+    for i in range(0, len(asset), 20):
+        blocco = asset[i:i + 20]
+        try:
+            prezzi = api.ticker([f"{a}-{valuta}" for a in blocco])
+        except Exception as e:
+            print("spread", e)
+            continue
+        for a in blocco:
+            t = prezzi.get(f"{a}-{valuta}")
+            if not t:
+                continue
+            bid, ask = float(t["bid"]), float(t["ask"])
+            sp = (ask - bid) / ((ask + bid) / 2)
+            spread[a] = sp if a not in spread else spread[a] * 0.7 + sp * 0.3
 
 
 def ottimizza(api, dati, coppie):
     """Apprendimento: riprova tutte le varianti sugli ultimi giorni e tiene la migliore.
     Allenamento sui primi 2/3 del periodo, verifica sull'ultimo 1/3 (dati che la scelta non ha visto)."""
-    valuta, costo = CONFIG["valuta"], CONFIG["costo_per_operazione"]
+    valuta = CONFIG["valuta"]
     candidati = scegli_candidati(api, coppie, dati)
     # le crypto in mano vanno sempre analizzate, anche se sono uscite dalla lista
     candidati += [a for a in dati.get("posizioni", {}) if a not in candidati]
@@ -495,6 +542,7 @@ def ottimizza(api, dati, coppie):
             giorni_va = max(1.0, (n - taglio) * P["intervallo_candele"] / 1440)
             pausa = max(1, -(-pausa_ore(P["intervallo_candele"]) * 60 // P["intervallo_candele"]))
             args = (d["c"], d["ema"][P["ema_veloce"]], d["ema"][P["ema_lenta"]], d["rsi"], P)
+            costo = costo_reale(dati, a)
             r_tr, dd_tr, n_tr = backtest(*args, 0, taglio, costo, pausa)
             r_va, dd_va, n_va = backtest(*args, taglio, n, costo, pausa)
             # punteggi riportati a "ogni 10 giorni", così strategie veloci e lente sono confrontabili
@@ -505,33 +553,43 @@ def ottimizza(api, dati, coppie):
                             "operazioni_verifica_al_giorno": round(n_va / giorni_va, 1)}
         # le crypto migliori in allenamento, ma solo se guadagnano anche nella verifica
         # e con abbastanza operazioni da non essere solo un paio di colpi fortunati
-        affidabile = lambda a: (risultati[a]["operazioni"] >= CONFIG["min_operazioni_test"] and
-                                risultati[a]["operazioni_verifica"] >= CONFIG["min_operazioni_verifica"])
-        ordinate = sorted(risultati, key=lambda a: risultati[a]["train"], reverse=True)
+        affidabile = lambda a: risultati[a]["operazioni"] >= 2 and risultati[a]["operazioni_verifica"] >= 1
+        # le crypto con spread troppo alto (o non misurato) si analizzano solo per gestire quelle già in mano
+        ammessa = lambda a: (dati.get("spread") or {}).get(a, 1) <= CONFIG["spread_max"]
+        ordinate = sorted((a for a in risultati if ammessa(a)), key=lambda a: risultati[a]["train"], reverse=True)
         scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0
                   and affidabile(a)][:CONFIG["max_asset_attivi"]]
-        top = ordinate[:CONFIG["max_asset_attivi"]]
-        punteggio_train = sum(risultati[a]["train"] for a in top) / len(top)
-        punteggio_ver = (sum(risultati[a]["verifica"] for a in scelte) / len(scelte)) if scelte else -1
+        # punteggio sulla MEDIA di tutte le crypto analizzate, non solo sulle migliori:
+        # una strategia vale se funziona in generale, non se ha avuto fortuna su una sola moneta
+        tutte = ordinate or list(risultati)
+        punteggio_train = sum(risultati[a]["train"] for a in tutte) / len(tutte)
+        punteggio_ver = sum(risultati[a]["verifica"] for a in tutte) / len(tutte)
+        abbastanza = (sum(risultati[a]["operazioni"] for a in tutte) >= CONFIG["min_operazioni_test"] and
+                      sum(risultati[a]["operazioni_verifica"] for a in tutte) >= CONFIG["min_operazioni_verifica"])
+        if not scelte or not abbastanza:
+            punteggio_ver = -1
         return punteggio_train, punteggio_ver, scelte, risultati
 
-    # punteggio: media tra allenamento e verifica, così premia chi va bene in entrambi i periodi
+    # punteggio: il PEGGIORE tra allenamento e verifica, così vince solo chi va bene in entrambi i periodi
     migliore = None
     for P in griglia():
         tr, ve, scelte, ris = valuta_P(P)
-        if ve <= 0:
+        if ve <= 0 or tr <= 0:
             continue
-        if migliore is None or (tr + ve) / 2 > (migliore[0] + migliore[1]) / 2:
+        if migliore is None or min(tr, ve) > min(migliore[0], migliore[1]):
             migliore = (tr, ve, scelte, ris, P)
 
     attuale = dati.get("strategia") or strategia_iniziale()
+    if dati.get("versione_logica") != CONFIG["versione_logica"]:
+        # nuova versione del bot: si riparte dalla strategia di base (quella vecchia era stata scelta con costi irreali)
+        attuale = strategia_iniziale()
     if attuale.get("intervallo_candele") not in intervalli():
         # strategia attuale non più ammessa (es. veloci disattivate): va sostituita
         attuale = strategia_iniziale()
     tr_a, ve_a, scelte_a, ris_a = valuta_P(attuale)
 
     # cambia strategia solo se quella nuova è davvero migliore (margine minimo per non cambiare a caso)
-    if migliore and (migliore[0] + migliore[1]) / 2 > (tr_a + ve_a) / 2 + 0.002:
+    if migliore and min(migliore[0], migliore[1]) > min(tr_a, ve_a) + 0.002:
         tr, ve, scelte, ris, P = migliore
         origine = "ottimizzazione"
     else:
@@ -553,6 +611,7 @@ def ottimizza(api, dati, coppie):
     })
     cambiata = chiave(nuova) != chiave(attuale) or nuova["asset"] != attuale.get("asset")
     dati["strategia"] = nuova
+    dati["versione_logica"] = CONFIG["versione_logica"]
     dati.setdefault("storia_strategie", []).append({"t": ora_ms(), "asset": scelte, "parametri": list(chiave(nuova)),
                                                     "rendimento_verifica": nuova["rendimento_verifica"]})
     dati["storia_strategie"] = dati["storia_strategie"][-60:]
@@ -578,9 +637,11 @@ def descrivi_strategia(P):
                  f"<b>Crypto:</b> {crypto}",
                  f"<b>Candele:</b> {ore} · EMA {P['ema_veloce']}/{P['ema_lenta']} · RSI max {P['rsi_max_ingresso']}",
                  f"<b>Stop loss:</b> -{P['stop_loss']*100:.1f}% · <b>trailing:</b> -{P['trailing_stop']*100:.1f}% dopo +{P['attiva_trailing_dopo']*100:.1f}%".replace(".0%", "%")]
+    righe.append(f"<b>Costi:</b> commissione + spread reale di ogni crypto · escluse quelle con spread sopra "
+                 f"{CONFIG['spread_max']*100:.1f}%".replace(".", ","))
     if P.get("classifica"):
         righe.insert(2, f"<b>Analizzate:</b> {len(P['classifica'])} crypto · {P.get('varianti_provate', '–')} strategie ciascuna · "
-                        f"valide solo con almeno {CONFIG['min_operazioni_test']} operazioni simulate")
+                        f"valide solo con almeno {CONFIG['min_operazioni_test']} operazioni simulate in totale")
     if P.get("rendimento_verifica") is not None:
         righe.append(f"<b>Test sugli ultimi {P.get('giorni_verifica', 20)} giorni:</b> {P['rendimento_verifica']:+.2f}% (simulazione al netto dei costi, non è una promessa)")
         righe.append(f"<b>Operazioni previste:</b> circa {P.get('operazioni_al_giorno', 0)} al giorno per crypto")
@@ -982,6 +1043,7 @@ def main():
 
     # apprendimento: ricalcola la strategia una volta al giorno (o su comando /ottimizza)
     scaduta = (not dati["strategia"].get("aggiornata") or
+               dati.get("versione_logica") != CONFIG["versione_logica"] or
                dati["strategia"].get("intervallo_candele") not in intervalli() or
                ora_ms() - dati["strategia"]["aggiornata"] > CONFIG["ottimizza_ogni_ore"] * 3_600_000)
     if scaduta or "/ottimizza" in comandi:
@@ -1076,8 +1138,15 @@ def main():
 
             pos = dati["posizioni"].get(a)
             if pos:
-                pos["picco"] = max(pos["picco"], bid)
-                motivo = esce(P, bid, pos["prezzo_ingresso"], pos["picco"], ef, el, r)
+                # stesse regole della simulazione: si guarda la chiusura dell'ultima candela, non ogni oscillazione
+                # del momento (su Revolut X il prezzo può fare scatti di qualche % per pochi secondi)
+                entrata = pos["prezzo_ingresso"]
+                pos["picco"] = max(pos["picco"], ch[-1])
+                motivo = esce(P, ch[-1], entrata, pos["picco"], ef, el, r)
+                if not motivo and bid <= entrata * (1 - P["stop_loss"] * CONFIG["stop_emergenza_x"]):
+                    motivo = f"stop di emergenza (-{P['stop_loss'] * CONFIG['stop_emergenza_x'] * 100:.0f}%)"
+                if not motivo and tipo(P) == "rimbalzo" and bid >= entrata * (1 + P["take_profit"]):
+                    motivo = f"rimbalzo incassato (+{P['take_profit']*100:.0f}%)"
                 if motivo:
                     qty = qty_vendibile(dati, saldi, a)
                     vendi(api, dati, a, qty, bid, coppie, motivo)
