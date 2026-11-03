@@ -61,6 +61,9 @@ CONFIG = {
                                      # (es. PEPE in euro: spread ~0,8% e prezzi "a scatti" per mancanza di scambi)
     "escluse": ["USDT", "USDC", "EURC", "EUROC", "DAI", "PYUSD", "FDUSD", "TUSD", "USDE", "RLUSD", "USD1", "EURT", "USDP", "GUSD"],
                                      # stablecoin: valgono sempre ~1 dollaro/euro, non ha senso farci trading
+    "escluse_sempre": ["PEPE", "SHIB", "BONK", "FLOKI", "WIF", "BTT", "MOG", "TURBO", "NEIRO"],
+                                     # meme coin da frazioni di centesimo: su Revolut X in euro hanno prezzi "a scatti"
+    "prezzo_minimo": 0.01,           # e in generale esclude le crypto che valgono meno di 1 centesimo
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
     "ottimizza_ogni_ore": 1,         # ogni ora rifà l'analisi del mercato
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
@@ -78,7 +81,7 @@ CONFIG = {
     "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
     "ora_report": 21,                # ora (Italia) del resoconto giornaliero su Telegram
-    "versione_logica": 2,            # se cambia, il bot ricalcola subito la strategia
+    "versione_logica": 3,            # se cambia, il bot ricalcola subito la strategia
 }
 
 BASE = "https://revx.revolut.com"
@@ -283,6 +286,17 @@ def chiusure(candele_orarie, minuti):
             for k, g in sorted(gruppi.items()) if len(g) == per]
 
 
+def ore_interne(candele_orarie, minuti):
+    """Per le candele da 4 ore: le chiusure orarie dentro ogni candela (stesso ordine di chiusure())."""
+    if minuti == 60:
+        return None
+    per, gruppi = minuti // 60, {}
+    for c in candele_orarie:
+        gruppi.setdefault(c["start"] // (minuti * 60_000), []).append(c)
+    return [[float(x["close"]) for x in sorted(g, key=lambda x: x["start"])]
+            for k, g in sorted(gruppi.items()) if len(g) == per]
+
+
 def serie_ema(v, p):
     out = [None] * len(v)
     if len(v) < p:
@@ -340,8 +354,18 @@ def entra(P, p, ef_i, el_i, rs_i, prezzo_7g_fa):
     return ef_i > el_i and p > el_i and rs_i < P["rsi_max_ingresso"]
 
 
-def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
-    """Simula la strategia sulle candele [da, a). Ritorna (rendimento, calo massimo, n. operazioni)."""
+def esce_orario(P, q, entrata):
+    """Controllo di ogni ora tra una candela e l'altra: solo stop loss e (per il rimbalzo) obiettivo."""
+    if q <= entrata * (1 - P["stop_loss"]):
+        return f"stop loss (-{P['stop_loss']*100:.1f}%)".replace(".0%", "%")
+    if tipo(P) == "rimbalzo" and q >= entrata * (1 + P["take_profit"]):
+        return f"rimbalzo incassato (+{P['take_profit']*100:.0f}%)"
+    return None
+
+
+def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre, ore=None):
+    """Simula la strategia sulle candele [da, a). Ritorna (rendimento, calo massimo, n. operazioni).
+    Con `ore` (candele da 4 ore) stop loss e obiettivo si controllano anche ogni ora, come fa il bot vero."""
     cap, pos, entrata, picco = 1.0, False, 0.0, 0.0
     ultima_uscita, max_eq, max_calo, n = -10**9, 1.0, 0.0, 0
     barre_7g = 7 * 1440 // P["intervallo_candele"]
@@ -354,6 +378,12 @@ def backtest(c, ef, el, rs, P, da, a, costo, pausa_barre):
             if esce(P, p, entrata, picco, ef[i], el[i], rs[i]):
                 cap *= p / entrata * (1 - costo)
                 pos, ultima_uscita, n = False, i, n + 1
+            elif ore is not None and i + 1 < a:
+                for q in ore[i + 1][:-1]:  # l'ultima ora coincide con la chiusura della candela dopo
+                    if esce_orario(P, q, entrata):
+                        cap *= q / entrata * (1 - costo)
+                        pos, ultima_uscita, n = False, i + 1, n + 1
+                        break
             eq = cap * p / entrata if pos else cap
         else:
             fa7 = c[i - barre_7g] if i >= barre_7g else None
@@ -457,7 +487,7 @@ def scegli_candidati(api, coppie, dati):
     predefinite = [a for a in CONFIG["asset_candidati"] if attive(a)]
     if not CONFIG.get("tutte_le_crypto"):
         return predefinite
-    escluse = set(CONFIG["escluse"]) | {valuta}
+    escluse = set(CONFIG["escluse"]) | set(CONFIG.get("escluse_sempre", [])) | {valuta}
     tutte = sorted({k.split("/")[0] for k in coppie if k.endswith("/" + valuta)} - escluse)
     volumi = {}
     for a in tutte:
@@ -472,14 +502,24 @@ def scegli_candidati(api, coppie, dati):
     # spread reale (differenza tra prezzo di acquisto e di vendita), media mobile delle misure orarie
     misura_spread(api, dati, liquide)
     spread = dati.get("spread", {})
-    scartate = {a: round(spread[a] * 100, 2) for a in liquide if spread.get(a, 1) > CONFIG["spread_max"]}
-    liquide = [a for a in liquide if spread.get(a, 1) <= CONFIG["spread_max"]]
+    scartate = {a: round(spread[a] * 100, 2) for a in liquide if not crypto_ammessa(dati, a)}
+    liquide = [a for a in liquide if crypto_ammessa(dati, a)]
     dati["mercato"] = {"t": ora_ms(), "crypto_in_euro": len(tutte), "volumi_24h": dict(sorted(volumi.items(), key=lambda x: -x[1])[:30]),
                        "spread_%": {a: round(v * 100, 3) for a, v in sorted(spread.items(), key=lambda x: x[1])},
                        "escluse_per_spread_%": scartate}
     if len(liquide) < 3:
         return [a for a in predefinite if spread.get(a, 0) <= CONFIG["spread_max"]] or predefinite
     return liquide[:CONFIG["max_candidati"]]
+
+
+def crypto_ammessa(dati, a):
+    """Si può comprare: spread basso, non è una meme coin esclusa e vale almeno 1 centesimo."""
+    if a in CONFIG.get("escluse_sempre", []):
+        return False
+    prezzo = (dati.get("prezzo_ref") or {}).get(a)
+    if prezzo is not None and prezzo < CONFIG.get("prezzo_minimo", 0):
+        return False
+    return (dati.get("spread") or {}).get(a, 1) <= CONFIG["spread_max"]
 
 
 def misura_spread(api, dati, asset):
@@ -497,6 +537,7 @@ def misura_spread(api, dati, asset):
             if not t:
                 continue
             bid, ask = float(t["bid"]), float(t["ask"])
+            dati.setdefault("prezzo_ref", {})[a] = (ask + bid) / 2
             sp = (ask - bid) / ((ask + bid) / 2)
             spread[a] = sp if a not in spread else spread[a] * 0.7 + sp * 0.3
 
@@ -530,6 +571,7 @@ def ottimizza(api, dati, coppie):
         for intervallo in intervalli():
             c = [float(x["close"]) for x in storici15[a]] if intervallo == 15 else chiusure(storici[a], intervallo)
             prep[(a, intervallo)] = {"c": c, "rsi": serie_rsi(c, CONFIG["rsi_periodo"]),
+                                     "ore": ore_interne(storici[a], intervallo) if intervallo == 240 else None,
                                      "ema": {p: serie_ema(c, p) for p in (5, 9, 12, 13, 20, 21, 26, 50)}}
 
     def valuta_P(P):
@@ -543,8 +585,8 @@ def ottimizza(api, dati, coppie):
             pausa = max(1, -(-pausa_ore(P["intervallo_candele"]) * 60 // P["intervallo_candele"]))
             args = (d["c"], d["ema"][P["ema_veloce"]], d["ema"][P["ema_lenta"]], d["rsi"], P)
             costo = costo_reale(dati, a)
-            r_tr, dd_tr, n_tr = backtest(*args, 0, taglio, costo, pausa)
-            r_va, dd_va, n_va = backtest(*args, taglio, n, costo, pausa)
+            r_tr, dd_tr, n_tr = backtest(*args, 0, taglio, costo, pausa, d["ore"])
+            r_va, dd_va, n_va = backtest(*args, taglio, n, costo, pausa, d["ore"])
             # punteggi riportati a "ogni 10 giorni", così strategie veloci e lente sono confrontabili
             risultati[a] = {"train": (r_tr - CONFIG["peso_rischio"] * dd_tr) * 10 / giorni_tr,
                             "verifica": (r_va - CONFIG["peso_rischio"] * dd_va) * 10 / giorni_va,
@@ -555,7 +597,7 @@ def ottimizza(api, dati, coppie):
         # e con abbastanza operazioni da non essere solo un paio di colpi fortunati
         affidabile = lambda a: risultati[a]["operazioni"] >= 2 and risultati[a]["operazioni_verifica"] >= 1
         # le crypto con spread troppo alto (o non misurato) si analizzano solo per gestire quelle già in mano
-        ammessa = lambda a: (dati.get("spread") or {}).get(a, 1) <= CONFIG["spread_max"]
+        ammessa = lambda a: crypto_ammessa(dati, a)
         ordinate = sorted((a for a in risultati if ammessa(a)), key=lambda a: risultati[a]["train"], reverse=True)
         scelte = [a for a in ordinate if risultati[a]["train"] > 0 and risultati[a]["verifica"] > 0
                   and affidabile(a)][:CONFIG["max_asset_attivi"]]
@@ -654,6 +696,9 @@ def descrivi_strategia(P):
 def fmt_prezzo(x):
     """Prezzo leggibile anche per le crypto che valgono pochi centesimi."""
     x = float(x)
+    if 0 < abs(x) < 0.01:
+        testo = f"{x:.4g}" if "e" not in f"{x:.4g}" else f"{x:.10f}".rstrip("0")
+        return testo.replace(".", ",") + " €"
     decimali = 2 if x >= 10 else 4 if x >= 0.1 else 6
     return f"{x:,.{decimali}f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -927,7 +972,7 @@ def compra(api, dati, asset, eur, prezzo_rif, coppie, motivo):
         "qty": str(qty), "costo": float(importo + (fee if det.get("fee_currency") == CONFIG["valuta"] else 0)),
         "prezzo_ingresso": float(prezzo), "picco": float(prezzo), "dal": ora_ms(),
     }
-    tg_invia(f"🟢 <b>COMPRATO {asset}</b>\n{qty} a {euro(prezzo)}\nSpesa: {euro(importo)} · commissione {euro(fee)}\nMotivo: {motivo}")
+    tg_invia(f"🟢 <b>COMPRATO {asset}</b>\n{qty} a {fmt_prezzo(prezzo)}\nSpesa: {euro(importo)} · commissione {euro(fee)}\nMotivo: {motivo}")
     return op
 
 
@@ -953,7 +998,7 @@ def vendi(api, dati, asset, qty_disp, prezzo_rif, coppie, motivo):
     dati["ultima_vendita"][asset] = ora_ms()
     r = op.get("risultato")
     extra = f"\nRisultato: {'+' if r >= 0 else ''}{euro(r)}" if r is not None else ""
-    tg_invia(f"🔴 <b>VENDUTO {asset}</b>\n{qty_v} a {euro(prezzo)}\nIncasso: {euro(importo)} · commissione {euro(fee)}{extra}\nMotivo: {motivo}")
+    tg_invia(f"🔴 <b>VENDUTO {asset}</b>\n{qty_v} a {fmt_prezzo(prezzo)}\nIncasso: {euro(importo)} · commissione {euro(fee)}{extra}\nMotivo: {motivo}")
     return op
 
 
@@ -1106,12 +1151,15 @@ def main():
             sim = f"{a}-{valuta}"
             if sim not in prezzi:
                 continue
+            ultima_ora = None
             try:
                 if P["intervallo_candele"] == 15:
                     ch = [float(x["close"]) for x in api.storico(sim, (P["ema_lenta"] + 40) // 4 + 1, 15)]
                 else:
                     ore = (P["ema_lenta"] + 40) * P["intervallo_candele"] // 60
-                    ch = chiusure(api.storico(sim, ore), P["intervallo_candele"])
+                    orarie = api.storico(sim, ore)
+                    ch = chiusure(orarie, P["intervallo_candele"])
+                    ultima_ora = float(orarie[-1]["close"]) if orarie else None
             except Exception as e:
                 dati["errori"] = (dati["errori"] + [f"{ora_iso()} candele {a}: {e}"])[-20:]
                 continue
@@ -1143,6 +1191,8 @@ def main():
                 entrata = pos["prezzo_ingresso"]
                 pos["picco"] = max(pos["picco"], ch[-1])
                 motivo = esce(P, ch[-1], entrata, pos["picco"], ef, el, r)
+                if not motivo and P["intervallo_candele"] != 15 and ultima_ora is not None:
+                    motivo = esce_orario(P, ultima_ora, entrata)
                 if not motivo and bid <= entrata * (1 - P["stop_loss"] * CONFIG["stop_emergenza_x"]):
                     motivo = f"stop di emergenza (-{P['stop_loss'] * CONFIG['stop_emergenza_x'] * 100:.0f}%)"
                 if not motivo and tipo(P) == "rimbalzo" and bid >= entrata * (1 + P["take_profit"]):

@@ -148,8 +148,10 @@
 <script>
 const fmt = n => (n==null||isNaN(n)) ? "–" : n.toLocaleString("it-IT",{style:"currency",currency:"EUR"});
 // prezzi delle crypto: più decimali per quelle che valgono pochi centesimi
-const fmtP = n => (n==null||isNaN(n)) ? "–" : n.toLocaleString("it-IT",{style:"currency",currency:"EUR",
-  minimumFractionDigits: n>=10?2:n>=0.1?4:6, maximumFractionDigits: n>=10?2:n>=0.1?4:6});
+const fmtP = n => (n==null||isNaN(n)) ? "–" : (n>0 && n<0.01)
+  ? n.toLocaleString("it-IT",{style:"currency",currency:"EUR",maximumSignificantDigits:4})
+  : n.toLocaleString("it-IT",{style:"currency",currency:"EUR",
+      minimumFractionDigits: n>=10?2:n>=0.1?4:6, maximumFractionDigits: n>=10?2:n>=0.1?4:6});
 const pct = n => (n>=0?"+":"") + n.toFixed(2).replace(".",",") + "%";
 const dt = t => new Date(t).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
 let dati=null, chart=null, giorni=0, tutto=false;
@@ -280,7 +282,7 @@ function render(){
     const buy=o.lato==="compra";
     const ris=o.risultato!=null?`<div class="s ${o.risultato>=0?"up":"down"}">${o.risultato>=0?"+":""}${fmt(o.risultato)}</div>`:`<div class="s">comm. ${fmt(o.commissione)}</div>`;
     return `<div class="row"><div><div class="t"><span class="pill ${buy?"buy":"sell"}">${buy?"COMPRA":"VENDE"}</span>${o.asset}</div>
-      <div class="s">${dt(o.t)} · a ${fmt(o.prezzo)} · ${o.motivo||""}</div></div>
+      <div class="s">${dt(o.t)} · a ${fmtP(o.prezzo)} · ${o.motivo||""}</div></div>
       <div class="r"><div class="t">${fmt(o.importo)}</div>${ris}</div></div>`;
   }).join("") : `<div class="empty">Ancora nessun movimento</div>`;
   const more=document.getElementById("more");
