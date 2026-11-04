@@ -81,7 +81,18 @@ CONFIG = {
     "pausa_dopo_vendita_ore_15m": 1, # ...ma con la strategia veloce (15 minuti) aspetta solo 1 ora
     "soglia_emergenza": 0.70,        # se il capitale scende sotto il 70% vende tutto e si ferma
     "ora_report": 21,                # ora (Italia) del resoconto giornaliero su Telegram
-    "versione_logica": 3,            # se cambia, il bot ricalcola subito la strategia
+    "versione_logica": 3,
+
+    # Consumo elettrico del PC di casa (solo quando il bot gira sul PC, non su GitHub)
+    "prezzo_kwh": 0.25,              # €/kWh tutto compreso: si cambia da Telegram con /prezzo_kwh 0,23
+    "shelly_ip": "",                 # indirizzo della presa Shelly (si imposta da Telegram con /presa 192.168.1.50)
+    "stima_watt": {                  # stima finché non c'è la presa: PC i3-8100 + GTX 1050 Ti
+        "base": 16,                  # scheda madre, RAM, 3 SSD, ventole
+        "cpu_riposo": 6, "cpu_massimo": 65,   # processore da fermo / al 100%
+        "gpu_riposo": 7,             # scheda video se il driver non comunica il consumo
+        "efficienza_alimentatore": 0.82,
+        "monitor": 0,                # watt dei monitor da aggiungere (0 = esclusi)
+    },            # se cambia, il bot ricalcola subito la strategia
 }
 
 BASE = "https://revx.revolut.com"
@@ -869,8 +880,106 @@ def tg_comandi(dati):
             continue
         testo = (m.get("text") or "").strip().split("@")[0].lower()
         if testo.startswith("/"):
-            comandi.append(testo.split()[0])
+            parti = testo.split(maxsplit=1)
+            comandi.append(parti[0])
+            ARGOMENTI[parti[0]] = parti[1] if len(parti) > 1 else ""
     return comandi
+
+
+ARGOMENTI = {}  # comando Telegram -> testo scritto dopo (es. /prezzo_kwh 0,23)
+
+
+# ---------------------------------------------------------------------------
+# CONSUMO ELETTRICO DEL PC
+# ---------------------------------------------------------------------------
+def sul_pc():
+    """True quando il bot gira sul PC di casa (avvia_pc.py imposta BOT_DATA_FILE), non su GitHub."""
+    return os.name == "nt" and bool(os.environ.get("BOT_DATA_FILE"))
+
+
+def _tempi_cpu():
+    import ctypes
+    from ctypes import wintypes
+    idle, kern, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+    ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user))
+    v = lambda f: (f.dwHighDateTime << 32) | f.dwLowDateTime
+    return v(idle), v(kern) + v(user)  # il tempo "kernel" comprende già quello di riposo
+
+
+def _watt_gpu():
+    import shutil
+    import subprocess
+    exe = shutil.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
+    try:
+        r = subprocess.run([exe, "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=5, creationflags=0x08000000)
+        return sum(float(x) for x in r.stdout.split() if x.replace(".", "", 1).isdigit()) or None
+    except Exception:
+        return None
+
+
+def misura_energia(dati):
+    """Ogni giro: watt del PC (presa Shelly se c'è, altrimenti stima) e kWh accumulati."""
+    if not sul_pc():
+        return
+    e = dati.setdefault("energia", {"totale_kwh": 0.0, "giorni": {}, "dal": ora_ms()})
+    adesso = time.time()
+    watt, fonte, dettaglio = None, None, {}
+    ip = (e.get("shelly_ip") or CONFIG.get("shelly_ip") or "").strip()
+    if ip:
+        try:
+            r = requests.get(f"http://{ip}/rpc/Switch.GetStatus", params={"id": 0}, timeout=3).json()
+            watt, fonte = float(r["apower"]), "presa"
+        except Exception as ex:
+            e["errore_presa"] = f"{ora_iso()} {str(ex)[:120]}"
+    if watt is None:
+        k = CONFIG["stima_watt"]
+        try:
+            idle, tot = _tempi_cpu()
+            pi, pt = e.get("cpu_prev", (idle, tot))
+            uso = max(0.0, min(1.0, 1 - (idle - pi) / (tot - pt))) if tot > pt else e.get("cpu_frazione", 0.05)
+            e["cpu_prev"] = (idle, tot)
+        except Exception:
+            uso = 0.05
+        gpu = _watt_gpu()
+        dc = k["base"] + k["cpu_riposo"] + (k["cpu_massimo"] - k["cpu_riposo"]) * uso + (gpu or k["gpu_riposo"])
+        watt, fonte = dc / k["efficienza_alimentatore"] + k["monitor"], "stima"
+        dettaglio = {"cpu_uso": round(uso * 100, 1), "gpu_w": round(gpu, 1) if gpu else None}
+        e["cpu_frazione"] = uso
+    passato = adesso - e.get("t", adesso)
+    if 0 < passato <= 600:  # con buchi più lunghi il PC era spento (o girava GitHub): niente consumo
+        kwh = (watt + e.get("w", watt)) / 2 * passato / 3_600_000
+        e["totale_kwh"] = e.get("totale_kwh", 0.0) + kwh
+        giorno = datetime.now(FUSO).strftime("%Y-%m-%d")
+        e["giorni"][giorno] = e["giorni"].get(giorno, 0.0) + kwh
+        e["giorni"] = dict(sorted(e["giorni"].items())[-400:])
+    e.update({"t": adesso, "w": round(watt, 1), "fonte": fonte, **dettaglio,
+              "prezzo_kwh": prezzo_kwh(dati)})
+
+
+def prezzo_kwh(dati):
+    return float(dati.get("prezzo_kwh_utente") or CONFIG["prezzo_kwh"])
+
+
+def testo_consumo(dati):
+    e = dati.get("energia")
+    if not e:
+        return "Il consumo si misura solo quando il bot gira sul PC di casa."
+    pk, oggi = prezzo_kwh(dati), datetime.now(FUSO)
+    g = e.get("giorni", {})
+    kwh_oggi = g.get(oggi.strftime("%Y-%m-%d"), 0.0)
+    kwh_mese = sum(v for k, v in g.items() if k.startswith(oggi.strftime("%Y-%m")))
+    ultimi = [v for k, v in sorted(g.items())[-8:-1]]  # ultimi 7 giorni completi
+    media = sum(ultimi) / len(ultimi) if ultimi else None
+    righe = [f"⚡ <b>Consumo del PC</b> ({'presa Shelly' if e.get('fonte') == 'presa' else 'stima'})",
+             f"Adesso: {e.get('w', 0):.0f} W",
+             f"Oggi: {kwh_oggi:.2f} kWh · {euro(kwh_oggi * pk)}".replace(".", ",", 1),
+             f"Questo mese: {kwh_mese:.2f} kWh · {euro(kwh_mese * pk)}".replace(".", ",", 1),
+             f"Totale: {e.get('totale_kwh', 0):.2f} kWh · {euro(e.get('totale_kwh', 0) * pk)}".replace(".", ",", 1)]
+    if media:
+        righe.append(f"Stima annua: {media * 365:.0f} kWh · {euro(media * 365 * pk)}")
+    righe.append(f"Prezzo usato: {pk:.4f} €/kWh".replace(".", ","))
+    return "\n".join(righe)
 
 
 # ---------------------------------------------------------------------------
@@ -1032,6 +1141,11 @@ def main():
         return sorted(f"{a}-{valuta}" for a in nomi)
 
     comandi = tg_comandi(dati)
+    if not SOLO_TEST:
+        try:
+            misura_energia(dati)
+        except Exception as e:
+            print("consumo non misurato:", e)
     api = RevX(API_KEY, PRIVATE_PEM)
 
     saldi = api.saldi()
@@ -1113,7 +1227,30 @@ def main():
                      "/pausa – niente nuovi acquisti (stop loss resta attivo)\n/riprendi – riattiva il bot\n"
                      "/vendi_tutto – vende tutto e mette in pausa\n/strategia – strategia attuale\n"
                      "/perche – cosa vede il bot e cosa aspetta per comprare\n"
-                     "/ottimizza – ricalcola subito la strategia")
+                     "/ottimizza – ricalcola subito la strategia\n"
+                     "/consumo – quanto consuma e costa il PC\n"
+                     "/prezzo_kwh 0,23 – imposta il prezzo della corrente\n"
+                     "/presa 192.168.1.50 – collega la presa Shelly (/presa no per toglierla)")
+        elif c == "/consumo":
+            tg_invia(testo_consumo(dati))
+        elif c == "/prezzo_kwh":
+            try:
+                v = float(ARGOMENTI.get(c, "").replace("€", "").replace(",", ".").strip())
+                if not 0.01 <= v <= 2:
+                    raise ValueError
+                dati["prezzo_kwh_utente"] = v
+                tg_invia(f"✅ Prezzo della corrente impostato a {v:.4f} €/kWh".replace(".", ","))
+            except ValueError:
+                tg_invia("Scrivi il prezzo al kWh, per esempio: /prezzo_kwh 0,23")
+        elif c == "/presa":
+            ip = ARGOMENTI.get(c, "").strip()
+            e = dati.setdefault("energia", {"totale_kwh": 0.0, "giorni": {}, "dal": ora_ms()})
+            if ip.lower() in ("no", "off", ""):
+                e["shelly_ip"] = ""
+                tg_invia("Presa scollegata: torno alla stima dei consumi.")
+            else:
+                e["shelly_ip"] = ip
+                tg_invia(f"🔌 Presa impostata su {ip}: dal prossimo giro leggo i watt veri.")
         elif c == "/strategia":
             tg_invia("🧠 <b>Strategia attuale</b>\n" + descrivi_strategia(P))
         elif c in ("/perche", "/perché"):
@@ -1241,7 +1378,8 @@ def main():
     oggi = adesso.strftime("%Y-%m-%d")
     if adesso.hour >= CONFIG["ora_report"] and dati.get("ultimo_report") != oggi:
         dati["ultimo_report"] = oggi
-        tg_invia("🌙 <b>Resoconto del giorno</b>\n" + riepilogo(dati, valore, dettagliato=True))
+        extra = ("\n\n" + testo_consumo(dati)) if dati.get("energia") else ""
+        tg_invia("🌙 <b>Resoconto del giorno</b>\n" + riepilogo(dati, valore, dettagliato=True) + extra)
 
     salva_dati(dati)
 

@@ -134,6 +134,11 @@
     <div id="strategia"></div>
   </div>
 
+  <div class="card" id="cardEnergia" style="display:none">
+    <h2>Consumo del PC</h2>
+    <div id="energia"></div>
+  </div>
+
   <div class="card">
     <h2>Storico movimenti</h2>
     <div id="storico"></div>
@@ -287,6 +292,30 @@ function render(){
   }).join("") : `<div class="empty">Ancora nessun movimento</div>`;
   const more=document.getElementById("more");
   more.style.display = (!tutto && lista.length>15) ? "block":"none";
+
+  // consumo elettrico del PC
+  const en=d.energia, cE=document.getElementById("cardEnergia");
+  if(en){
+    cE.style.display="block";
+    const pk=en.prezzo_kwh||0.25, g=en.giorni||{}, oggi=new Date();
+    const chiave=x=>x.toLocaleDateString("sv-SE",{timeZone:"Europe/Rome"});
+    const kOggi=g[chiave(oggi)]||0, mese=chiave(oggi).slice(0,7);
+    const kMese=Object.entries(g).filter(([k])=>k.startsWith(mese)).reduce((s,[,v])=>s+v,0);
+    const ultimi=Object.entries(g).sort().slice(-8,-1).map(([,v])=>v);
+    const media=ultimi.length?ultimi.reduce((a,b)=>a+b,0)/ultimi.length:null;
+    const kwh=n=>n.toLocaleString("it-IT",{maximumFractionDigits:2})+" kWh";
+    const costoTot=(en.totale_kwh||0)*pk, risBot=(val!=null&&ini)?val-ini:null;
+    const vivo=en.t && (Date.now()/1000-en.t<600);
+    document.getElementById("energia").innerHTML=`
+      <div class="row"><div><div class="t">Adesso</div><div class="s">${en.fonte==="presa"?"misurato dalla presa Shelly":"stima"+(en.cpu_uso!=null?` · processore ${String(en.cpu_uso).replace(".",",")}%`:"")+(en.gpu_w?` · scheda video ${Math.round(en.gpu_w)} W`:"")}</div></div>
+        <div class="r"><div class="t">${vivo?Math.round(en.w)+" W":"PC spento"}</div></div></div>
+      <div class="row"><div><div class="t">Oggi</div><div class="s">${kwh(kOggi)}</div></div><div class="r"><div class="t">${fmt(kOggi*pk)}</div></div></div>
+      <div class="row"><div><div class="t">Questo mese</div><div class="s">${kwh(kMese)}</div></div><div class="r"><div class="t">${fmt(kMese*pk)}</div></div></div>
+      <div class="row"><div><div class="t">Totale</div><div class="s">${kwh(en.totale_kwh||0)} dal ${en.dal?new Date(en.dal).toLocaleDateString("it-IT"):"–"}</div></div><div class="r"><div class="t">${fmt(costoTot)}</div></div></div>
+      ${media?`<div class="row"><div><div class="t">Stima annua</div><div class="s">${kwh(media*365)} · media ultimi 7 giorni</div></div><div class="r"><div class="t">${fmt(media*365*pk)}</div></div></div>`:""}
+      ${risBot!=null?`<div class="row"><div><div class="t">Bot meno corrente</div><div class="s">risultato del bot ${fmt(risBot)} − corrente ${fmt(costoTot)}</div></div><div class="r"><div class="t ${risBot-costoTot>=0?"up":"down"}">${fmt(risBot-costoTot)}</div></div></div>`:""}
+      <div class="row"><div><div class="s">Prezzo usato: ${pk.toLocaleString("it-IT",{maximumFractionDigits:4})} €/kWh · si cambia su Telegram con /prezzo_kwh</div></div></div>`;
+  } else cE.style.display="none";
 
   const errs=d.errori||[], eEl=document.getElementById("errore");
   const recente = errs.length && (Date.now()-new Date(errs[errs.length-1].slice(0,25)).getTime() < 3600e3);
