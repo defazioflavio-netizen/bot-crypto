@@ -3,7 +3,7 @@ Bot crypto per Revolut X - esperimento personale.
 
 Gira sul PC di casa ogni 45 secondi (GitHub Actions fa da riserva):
   1. legge i comandi Telegram
-  2. ogni ora sceglie le crypto in euro più scambiate e prova centinaia di strategie sul loro storico
+  2. una volta al giorno sceglie le crypto in euro più scambiate e prova centinaia di strategie sul loro storico
   3. scarica prezzi e candele da Revolut X e applica la strategia migliore (trend o rimbalzo, stop loss, trailing stop)
   4. compra/vende con ordini market e spiega per ogni crypto cosa vede e cosa manca per comprare
   5. salva tutto in data.json (letto dalla dashboard)
@@ -65,7 +65,8 @@ CONFIG = {
                                      # meme coin da frazioni di centesimo: su Revolut X in euro hanno prezzi "a scatti"
     "prezzo_minimo": 0.01,           # e in generale esclude le crypto che valgono meno di 1 centesimo
     "max_asset_attivi": 3,           # su quante crypto al massimo opera insieme
-    "ottimizza_ogni_ore": 1,         # ogni ora rifà l'analisi del mercato
+    "ottimizza_ogni_ore": 24,        # una volta al giorno rifà l'analisi del mercato (ogni ora cambiava strategia troppo spesso)
+    "margine_cambio_strategia": 0.01, # la nuova strategia deve battere quella attuale di almeno 1% ogni 10 giorni (simulato)
     "giorni_storico": 60,            # storico per le strategie su candele da 1 e 4 ore
     "giorni_storico_15m": 20,        # storico per le strategie veloci su candele da 15 minuti
     "strategie_veloci": False,       # candele da 15 minuti: con i costi reali di Revolut X perdevano sempre (spento)
@@ -642,7 +643,7 @@ def ottimizza(api, dati, coppie):
     tr_a, ve_a, scelte_a, ris_a = valuta_P(attuale)
 
     # cambia strategia solo se quella nuova è davvero migliore (margine minimo per non cambiare a caso)
-    if migliore and min(migliore[0], migliore[1]) > min(tr_a, ve_a) + 0.002:
+    if migliore and min(migliore[0], migliore[1]) > min(tr_a, ve_a) + CONFIG["margine_cambio_strategia"]:
         tr, ve, scelte, ris, P = migliore
         origine = "ottimizzazione"
     else:
@@ -1346,7 +1347,9 @@ def main():
                     continue
                 # usa solo la liquidità del bot (100 € + guadagni), mai altri euro del conto
                 disponibile = min(float(saldi.get(valuta, {}).get("available", "0")), liquidita_bot(dati))
-                quota = 1 / max(1, len(P["asset"]))
+                # quota fissa: ogni acquisto usa al massimo 1/3 del capitale, anche se la strategia
+                # ha scelto una sola crypto (prima in quel caso investiva tutto su una moneta)
+                quota = 1 / max(1, CONFIG["max_asset_attivi"])
                 importo = min(disponibile, dati["capitale_bot"] * quota) * 0.995
                 if importo >= CONFIG["ordine_minimo"]:
                     motivo = (f"rimbalzo: crypto scesa troppo (RSI {r:.0f} sotto {P['rsi_ingresso']})"

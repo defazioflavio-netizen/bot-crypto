@@ -130,7 +130,7 @@
   </div>
 
   <div class="card">
-    <h2>Strategia · si riadatta ogni ora</h2>
+    <h2>Strategia · si riadatta ogni giorno</h2>
     <div id="strategia"></div>
   </div>
 
@@ -269,7 +269,7 @@ function render(){
     const crypto=(P.asset&&P.asset.length)?P.asset.join(", "):"nessuna: mercato sfavorevole, resta in liquidità";
     const cl=P.classifica||{}, nomi=Object.keys(cl).sort((a,b)=>cl[b]["verifica_%"]-cl[a]["verifica_%"]);
     stEl.innerHTML=`
-      <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra le ${Object.keys(cl).length||"–"} più scambiate${d.mercato?.crypto_in_euro?` (su ${d.mercato.crypto_in_euro} in euro)`:""} · analisi ogni ora</div></div><div class="r"><div class="t">${crypto}</div></div></div>
+      <div class="row"><div><div class="t">Crypto scelte</div><div class="s">tra le ${Object.keys(cl).length||"–"} più scambiate${d.mercato?.crypto_in_euro?` (su ${d.mercato.crypto_in_euro} in euro)`:""} · analisi ogni giorno</div></div><div class="r"><div class="t">${crypto}</div></div></div>
       ${P.tipo==="rimbalzo"
         ? `<div class="row"><div><div class="t">Tipo: rimbalzo</div><div class="s">candele ${ore} · compra con RSI sotto ${P.rsi_ingresso}, rivende sopra ${P.rsi_uscita}</div></div>
             <div class="r"><div class="s">obiettivo +${Math.round(P.take_profit*100)}%<br>stop -${Math.round(P.stop_loss*100)}%</div></div></div>`
